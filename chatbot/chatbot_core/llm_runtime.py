@@ -12,7 +12,7 @@ from .retrieval import Retriever
 from .slang import reply_cues
 
 
-RUNTIME_VERSION = "backup-user-style-v6-repeat-guard"
+RUNTIME_VERSION = "backup-user-style-v8-slang-evidence"
 
 
 PERSONA_NARRATIVE = [
@@ -79,7 +79,14 @@ class ChatEngine:
     ) -> dict[str, Any]:
         history = history or []
         conversation_memory = conversation_memory or []
-        memories = self.retriever.search(message, limit=10)
+        retrieval_query = self.build_retrieval_query(message, history)
+        memories = self.retriever.search(retrieval_query, limit=10)
+        if self.is_memory_dispute_question(message) and self.has_memory_evidence(message, history, memories):
+            return {
+                "reply": self.memory_evidence_reply(message, history, memories),
+                "mode": f"{self.mode}_evidence_route",
+                "memories": memories,
+            }
         if self.should_route_locally(message):
             return {
                 "reply": self.local_reply(message, memories, conversation_memory),
@@ -153,6 +160,7 @@ class ChatEngine:
                 "persona_narrative": PERSONA_NARRATIVE,
                 "persona_five_axes": persona_brief,
                 "recent_history": history,
+                "conversation_evidence": self.extract_conversation_evidence(message, history),
                 "recent_assistant_replies": recent_assistant_replies,
                 "conversation_memory": conversation_memory,
                 "retrieved_memories": memories,
@@ -262,6 +270,8 @@ class ChatEngine:
             return pick(["NonForgetter啊", "你是 NonForgetter 啊", "这还要问啊，NonForgetter"], stripped)
         if self.is_bot_identity_question(stripped):
             return pick(["backup啊", "那就乐乐吧", "你刚不是叫我乐乐吗"], stripped)
+        if self.is_slang_meaning_question(stripped):
+            return self.slang_meaning_reply(stripped)
         if self.is_meaning_question(stripped):
             return self.meaning_reply(stripped)
 
@@ -315,6 +325,8 @@ class ChatEngine:
             return self.local_reply(message, memories, conversation_memory)
         if self.is_repeated_reply(cleaned, history or []):
             return self.repair_repeated_reply(message)
+        if self.is_memory_dispute_question(message) and self.looks_like_denial(cleaned) and self.has_memory_evidence(message, history or [], memories):
+            return self.memory_evidence_reply(message, history or [], memories)
         if self.is_capability_question(message) and cleaned in {"不知道", "不清楚", "说不清楚"}:
             return self.local_reply(message, memories, conversation_memory)
         return cleaned
@@ -333,6 +345,8 @@ class ChatEngine:
             return pick(["NonForgetter啊", "你啊，NonForgetter", "你是 NonForgetter，这还要问"], stripped)
         if self.is_bot_identity_question(stripped):
             return pick(["backup啊", "那就叫乐乐", "你不是刚给我取名了吗"], stripped)
+        if self.is_slang_meaning_question(stripped):
+            return self.slang_meaning_reply(stripped)
         if self.is_meaning_question(stripped):
             return self.meaning_reply(stripped)
         return pick(["我换个说法", "刚刚那句不算", "等下，我重说", "不是那个意思"], stripped)
@@ -367,6 +381,38 @@ class ChatEngine:
         return text
 
     @staticmethod
+    def is_memory_dispute_question(message: str) -> bool:
+        return any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "绝对没有", "有记录"])
+
+    @staticmethod
+    def looks_like_denial(reply: str) -> bool:
+        return any(token in reply for token in ["不知道", "没印象", "没说过", "记错", "没有吧", "不记得", "我咋知道"])
+
+    @staticmethod
+    def has_memory_evidence(message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> bool:
+        haystack = "\n".join(
+            [message]
+            + [str(item.get("content", "")) for item in history[-12:]]
+            + [str(memory.get("text", "")) for memory in memories[:5]]
+        )
+        if "姓林" in haystack or ("姓" in haystack and "林" in haystack):
+            return True
+        return any(token in haystack for token in ["乐乐", "说过", "记得"])
+
+    @staticmethod
+    def memory_evidence_reply(message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str:
+        haystack = "\n".join(
+            [message]
+            + [str(item.get("content", "")) for item in history[-12:]]
+            + [str(memory.get("text", "")) for memory in memories[:3]]
+        )
+        if "姓林" in haystack or ("姓" in haystack and "林" in haystack):
+            return "有，姓林这个我刚才没接上"
+        if "乐乐" in haystack:
+            return "有，乐乐这个要按梗和上下文看"
+        return "有相关的，我刚才没接上"
+
+    @staticmethod
     def filter_style_phrases(phrases: list[Any]) -> list[str]:
         result = []
         seen = set()
@@ -385,6 +431,28 @@ class ChatEngine:
             or ChatEngine.is_user_identity_question(message)
             or ChatEngine.is_meaning_question(message)
         )
+
+    @staticmethod
+    def build_retrieval_query(message: str, history: list[dict[str, Any]]) -> str:
+        recent_user_text = [
+            str(item.get("content", ""))
+            for item in history[-8:]
+            if item.get("role") == "user" and item.get("content")
+        ][-4:]
+        return "\n".join([message, *recent_user_text])
+
+    @staticmethod
+    def extract_conversation_evidence(message: str, history: list[dict[str, Any]]) -> list[dict[str, str]]:
+        if not any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "姓", "绝对没有"]):
+            return []
+        rows: list[dict[str, str]] = []
+        for item in history[-16:]:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            if any(token in content for token in ["乐乐", "姓", "林", "说过", "记得", "名字", "什么人"]):
+                rows.append({"role": str(item.get("role", "")), "content": content})
+        return rows[-8:]
 
     @staticmethod
     def is_capability_question(message: str) -> bool:
@@ -407,10 +475,22 @@ class ChatEngine:
         return any(token in message for token in ["什么意思", "啥意思", "什么含义", "何意味"])
 
     @staticmethod
+    def is_slang_meaning_question(message: str) -> bool:
+        return any(token in message for token in ["乐乐", "乐子", "梗", "网络梗"])
+
+    @staticmethod
     def meaning_reply(message: str) -> str:
         if "乐乐" in message:
             return pick(["就是你刚给我安的名字吧", "字面上就是乐那个乐，听着挺随便的", "大概就是个名字，没啥高深意思"], message)
         return pick(["字面意思吧", "你说哪个词", "这个要看你前面怎么用的"], message)
+
+    @staticmethod
+    def slang_meaning_reply(message: str) -> str:
+        if "乐乐" in message:
+            return pick(["乐子那个乐吧，不是单纯名字", "就是找乐子/看乐子的那个梗", "偏网络梗，差不多是好笑、找乐子的意思"], message)
+        if "乐子" in message:
+            return pick(["看热闹找乐子的意思", "就是拿来好笑/看戏的那个乐子", "乐子人那个乐子"], message)
+        return pick(["是梗，得看上下文", "按网络梗理解，不是字面硬翻", "这个要结合前后文看"], message)
 
     @staticmethod
     def extract_style_lines(memories: list[dict[str, Any]]) -> list[str]:

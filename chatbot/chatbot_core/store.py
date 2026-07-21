@@ -80,7 +80,7 @@ class ChatStore:
         text = (content or "").strip()
         if not text or len(text) > 120:
             return
-        if "?" in text or "？" in text or any(token in text for token in ["谁", "什么人", "什么意思", "啥意思"]):
+        if "?" in text or "？" in text or any(token in text for token in ["谁", "什么人", "什么意思", "啥意思", "是不是"]):
             return
         prefixes = ("我叫", "我是", "我喜欢", "我讨厌", "我不喜欢", "以后记住", "记住")
         if not text.startswith(prefixes):
