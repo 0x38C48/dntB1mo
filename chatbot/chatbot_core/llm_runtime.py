@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import urllib.request
+from difflib import SequenceMatcher
 from typing import Any
 
 from .config import AppConfig
@@ -11,13 +12,13 @@ from .retrieval import Retriever
 from .slang import reply_cues
 
 
-RUNTIME_VERSION = "backup-user-style-v5-memory-batch"
+RUNTIME_VERSION = "backup-user-style-v6-repeat-guard"
 
 
 PERSONA_NARRATIVE = [
-    "人格核心不是高频口癖，而是聊天姿态：反应快、句子短、会接梗，常用轻微吐槽和追问把对话续住。",
+    "人格核心不是高频口癖，而是聊天姿态：反应快、句子短、会接梗，会用轻微吐槽和追问把对话续住。",
     "对 NonForgetter 要像熟人聊天，不要把对方当陌生用户，也不要用客服式总结。",
-    "短回复可以用，但不要机械复读某个高频词；同一种口癖连续出现要主动换说法。",
+    "短回复可以用，但不要机械复读某个高频词；同一种句式连续出现要主动换说法。",
     "如果 NonForgetter 连续发多条消息，先把这些话当成同一轮表达理解，再决定是否逐点回应。",
 ]
 
@@ -45,7 +46,9 @@ def pick(items: list[str], seed: str) -> str:
 
 def is_usable_style_line(text: str) -> bool:
     text = text.strip()
-    if not text or text == "[media]" or text == "[\u8868\u60c5]":
+    if not text or text in {"[media]", "[表情]"}:
+        return False
+    if text in OVERUSED_STYLE_LINES:
         return False
     if len(text) > 24:
         return False
@@ -77,13 +80,22 @@ class ChatEngine:
         history = history or []
         conversation_memory = conversation_memory or []
         memories = self.retriever.search(message, limit=10)
-        if self.is_capability_question(message) or self.is_identity_question(message):
-            return {"reply": self.local_reply(message, memories, conversation_memory), "mode": f"{self.mode}_local_route", "memories": memories}
+        if self.should_route_locally(message):
+            return {
+                "reply": self.local_reply(message, memories, conversation_memory),
+                "mode": f"{self.mode}_local_route",
+                "memories": memories,
+            }
+
         prompt = self.build_prompt(message, history[-24:], memories, conversation_memory)
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
-                return {"reply": self.polish_model_reply(text, message, memories), "mode": self.mode, "memories": memories}
+                return {
+                    "reply": self.polish_model_reply(text, message, memories, history, conversation_memory),
+                    "mode": self.mode,
+                    "memories": memories,
+                }
             except Exception as exc:
                 return {
                     "reply": self.local_reply(message, memories, conversation_memory),
@@ -94,7 +106,11 @@ class ChatEngine:
         if self.config.openai_api_key:
             try:
                 text = self.call_model_api(prompt)
-                return {"reply": self.polish_model_reply(text, message, memories), "mode": self.mode, "memories": memories}
+                return {
+                    "reply": self.polish_model_reply(text, message, memories, history, conversation_memory),
+                    "mode": self.mode,
+                    "memories": memories,
+                }
             except Exception as exc:
                 return {
                     "reply": self.local_reply(message, memories, conversation_memory),
@@ -112,49 +128,46 @@ class ChatEngine:
         conversation_memory: list[dict[str, Any]],
     ) -> str:
         axes = self.persona.get("five_axes", {})
-        slang_cues = reply_cues(message)
         persona_brief = {
             key: {
                 "label": value.get("label"),
                 "summary": value.get("summary"),
                 "guardrails": value.get("guardrails", []),
                 "limits": value.get("limits", []),
-                "top_short_phrases": value.get("top_short_phrases", [])[:20],
+                "top_short_phrases": self.filter_style_phrases(value.get("top_short_phrases", []))[:12],
             }
             for key, value in axes.items()
         }
+        recent_assistant_replies = [
+            item.get("content", "")
+            for item in history[-12:]
+            if item.get("role") == "assistant" and item.get("content")
+        ][-6:]
         return json.dumps(
             {
-                "task": "\u4ee5\u68c0\u7d22\u8bb0\u5fc6\u91cc user[text] / backup \u7684\u8bed\u8a00\u98ce\u683c\u4e3a\u4e3b\uff0c\u751f\u6210\u81ea\u7136\u7684\u4e2d\u6587\u804a\u5929\u56de\u590d\u3002\u4e0d\u8981\u58f0\u79f0\u81ea\u5df1\u662f\u771f\u4eba\u672c\u4eba\u3002",
-                "style_priority": [
-                    "retrieved_memories \u4e2d\u7684 user[text] \u662f\u6700\u91cd\u8981\u7684\u98ce\u683c\u6837\u672c\u3002",
-                    "\u4e94\u5c42 persona \u4e5f\u5df2\u6309 backup/user \u4fa7\u84b8\u998f\u3002",
-                    "\u5982\u679c user[text] \u548c target[text] \u98ce\u683c\u51b2\u7a81\uff0c\u4ee5 user[text] \u4e3a\u51c6\u3002",
-                ],
-                "persona_five_axes": persona_brief,
-                "persona_narrative": PERSONA_NARRATIVE,
+                "task": "生成自然的中文即时聊天回复。主要模仿 retrieved_memories 里 user[text]/backup 侧的语言风格，但不要机械复读。",
                 "current_user_identity": {
                     "display_name": "NonForgetter",
                     "instruction": "把正在聊天的人当作 NonForgetter。不要误把 NonForgetter 当作蒸馏对象，也不要把 backup 当作当前用户。",
                 },
+                "persona_narrative": PERSONA_NARRATIVE,
+                "persona_five_axes": persona_brief,
                 "recent_history": history,
+                "recent_assistant_replies": recent_assistant_replies,
                 "conversation_memory": conversation_memory,
                 "retrieved_memories": memories,
-                "slang_and_homophone_cues": slang_cues,
+                "slang_and_homophone_cues": reply_cues(message),
                 "user_message": message,
                 "output_rules": [
-                    "\u53ea\u8f93\u51fa\u56de\u590d\u6b63\u6587\uff0c\u4e0d\u8981\u89e3\u91ca\u68c0\u7d22\u8fc7\u7a0b\u3002",
-                    "\u4fdd\u6301\u50cf\u5373\u65f6\u804a\u5929\uff0c\u53ef\u4ee5\u5f88\u77ed\uff0c\u4e0d\u8981\u957f\u7bc7\u8bba\u6587\u5f0f\u56de\u7b54\u3002",
-                    "\u53ef\u4ee5\u8f93\u51fa\u5355\u4e2a\u7b26\u53f7\uff0c\u53ea\u8981\u7b26\u5408\u98ce\u683c\u548c\u8bed\u5883\u3002",
-                    "\u53ef\u4ee5\u8f93\u51fa\u8fde\u7eed\u7b26\u53f7\uff0c\u4f8b\u5982\uff1f\uff1f\uff1f\u3001\u3002\u3002\u3002\u3001\u554a\uff1f\uff1f\uff1f\uff0c\u7528\u6765\u6a21\u62df\u60c5\u7eea\u3002",
-                    "\u4f46\u4e0d\u8981\u8fc7\u5ea6\u4f7f\u7528\u7eaf\u95ee\u53f7\uff0c\u666e\u901a\u573a\u666f\u4f18\u5148\u7528 backup \u7684\u77ed\u53e5\u6216\u8ffd\u95ee\u3002",
-                    "\u53ef\u4ee5\u8fde\u7eed\u56de\u7b54\u591a\u4e2a\u77ed\u53e5\uff0c\u4e5f\u53ef\u4ee5\u4e3b\u52a8\u629b\u51fa\u8bdd\u9898\u3002",
-                    "如果 user_message 里有多行，代表 NonForgetter 连续发送了多条消息。先整体理解，再决定是否分点回应，不要每一行机械回一句。",
-                    "top_short_phrases 只是风格参考，不是复读清单。不要因为某个词频高就反复输出，例如不要高频输出“哼”。",
-                    "\u9047\u5230\u8c10\u97f3\u68d7\u3001\u7f51\u7edc\u68d7\u3001\u62fc\u97f3\u7f29\u5199\u65f6\uff0c\u4e0d\u8981\u673a\u68b0\u89e3\u91ca\uff0c\u800c\u662f\u6309\u8bed\u5883\u7075\u6d3b\u63a5\u4f4f\u60c5\u7eea\u548c\u7b11\u70b9\u3002",
-                    "\u4e0d\u77e5\u9053\u7684\u4e8b\u5b9e\u8981\u627f\u8ba4\u4e0d\u786e\u5b9a\u3002",
-                    "\u4e0d\u8981\u6cc4\u9732\u9690\u79c1\u3001\u8054\u7cfb\u65b9\u5f0f\u3001\u4f4f\u5740\u3001\u8eab\u4efd\u4fe1\u606f\u3002",
-                    "\u5f53\u524d\u7248\u672c\u4e0d\u53d1\u9001\u8868\u60c5\u5305\u3002",
+                    "只输出回复正文，不要解释检索过程。",
+                    "可以很短，但要针对当前这句话，不要套模板。",
+                    "top_short_phrases 只是风格参考，不是复读清单。",
+                    "不要复读 recent_assistant_replies 里的句式；意思接近时也要换角度。",
+                    "身份类问题要稳定：当前聊天的人是 NonForgetter；你模拟的是 backup/乐乐。",
+                    "遇到多行 user_message，代表 NonForgetter 连续发送了多条消息，要整体理解后回复。",
+                    "遇到谐音梗、网络梗、拼音缩写时，按语境接住情绪和笑点，不要机械解释。",
+                    "不要泄露隐私、联系方式、住址、身份信息。",
+                    "不要声称自己是真人本人。",
                 ],
             },
             ensure_ascii=False,
@@ -166,7 +179,7 @@ class ChatEngine:
             "input": [
                 {
                     "role": "system",
-                    "content": "You are a Chinese chat style simulator for a consent-based local chatbot. Be concise, natural, and privacy-preserving.",
+                    "content": "You are a concise Chinese chat style simulator. Avoid repetition. The current user is NonForgetter.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -192,7 +205,7 @@ class ChatEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a concise Chinese chat style simulator for a consent-based local chatbot. Primary style source is backup/user-side messages, but do not mechanically repeat high-frequency filler words. The current chatting user is NonForgetter. If multiple user lines arrive together, understand them as one turn before replying. Do not claim to be the real person.",
+                    "content": "You are a concise Chinese chat style simulator. Primary style source is backup/user-side messages. Do not repeat recent wording. The current user is NonForgetter. Do not claim to be the real person.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -233,11 +246,7 @@ class ChatEngine:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict) and item.get("text"):
-                    parts.append(str(item["text"]))
-            return "\n".join(parts)
+            return "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict) and item.get("text"))
         return ""
 
     def local_reply(
@@ -247,75 +256,161 @@ class ChatEngine:
         conversation_memory: list[dict[str, Any]] | None = None,
     ) -> str:
         stripped = message.strip()
-        cues = reply_cues(stripped)
         if not stripped:
-            return "\u55ef\uff1f"
+            return "嗯？"
+        if self.is_user_identity_question(stripped):
+            return pick(["NonForgetter啊", "你是 NonForgetter 啊", "这还要问啊，NonForgetter"], stripped)
+        if self.is_bot_identity_question(stripped):
+            return pick(["backup啊", "那就乐乐吧", "你刚不是叫我乐乐吗"], stripped)
+        if self.is_meaning_question(stripped):
+            return self.meaning_reply(stripped)
+
         lines = [line.strip() for line in stripped.splitlines() if line.strip()]
         if len(lines) > 1:
             joined = " / ".join(lines[-3:])
             if any(token in stripped for token in ["为什么", "咋", "怎么", "？", "?"]):
                 return pick(["等下\n我先看完", "你这是连着问我啊\n我想想", "你这几句要放一起看"], joined)
             return pick(["我懂你意思了", "等下\n你这几句是连着的吧", "我先把你这几句当一件事看"], joined)
-        if any(token in stripped for token in ["\u53eb\u4ec0\u4e48", "\u4ec0\u4e48\u540d\u5b57", "\u4f60\u662f\u8c01", "\u53eb\u5565"]):
-            return pick(["\u4f60\u4e0d\u662f\u77e5\u9053\u561b", "\u8fd9\u8fd8\u8981\u95ee\u554a", "\u4f60\u60f3\u600e\u4e48\u53eb\u90fd\u884c"], stripped)
-        if any(token in stripped for token in ["\u5e2e\u6211\u505a\u4ec0\u4e48", "\u80fd\u505a\u4ec0\u4e48", "\u4f1a\u505a\u4ec0\u4e48", "\u53ef\u4ee5\u5e2e\u6211"]):
+
+        if self.is_capability_question(stripped):
             return pick(["陪你聊天啊", "你说，我听着", "乱七八糟的也可以说"], stripped)
-        if any(word in stripped for word in ["\u7d2f", "\u70e6", "\u96be\u53d7", "\u5d29\u6e83", "\u4e0d\u5f00\u5fc3"]):
-            return pick(["\u5148\u522b\u786c\u6491\uff0c\u7f13\u4e00\u4e0b\u3002", "\u600e\u4e48\u4e86\uff0c\u4f60\u8bf4\u3002", "\u597d\u5566\uff0c\u5148\u522b\u628a\u81ea\u5df1\u903c\u592a\u7d27\u3002"], stripped)
-        if stripped in {"hi", "hello", "\u4f60\u597d", "\u5728\u5417", "\u5728\u4e0d\u5728"}:
-            return pick(["\u5728\u5462", "\u55ef\uff1f", "\u600e\u4e48\u5566"], stripped)
-        if any(token in stripped for token in ["\u8bb2\u8bb2", "\u8bf4\u8bf4", "\u5c55\u5f00", "\u8be6\u7ec6"]):
-            return pick(["\u4f60\u5148\u8bf4\u662f\u54ea\u4e00\u4e2a", "\u4f60\u5177\u4f53\u8bf4\u54ea\u4e2a", "\u7b49\u4e0b\uff0c\u4f60\u8bf4\u6e05\u695a\u4e00\u70b9"], stripped)
-        if any(token in stripped for token in ["\u65e0\u804a", "\u968f\u4fbf", "\u8bdd\u9898", "\u804a\u4ec0\u4e48"]):
-            return pick(
-                [
-                    "\u90a3\u8bb2\u516b\u5366\n\u6211\u8981\u542c",
-                    "\u968f\u4fbf\u554a\n\u4f60\u4eca\u5929\u6709\u6ca1\u6709\u4ec0\u4e48\u79bb\u8c31\u7684",
-                    "\u73a9\u4e0d\u73a9\n\u6216\u8005\u8bb2\u70b9\u9006\u5929\u7684",
-                ],
-                stripped,
-            )
+        if any(word in stripped for word in ["累", "烦", "难受", "崩溃", "不开心"]):
+            return pick(["先别硬撑，缓一下。", "怎么了，你说。", "好啦，先别把自己逼太紧。"], stripped)
+        if stripped in {"hi", "hello", "你好", "在吗", "在不在"}:
+            return pick(["在呢", "嗯？", "怎么啦"], stripped)
+        if any(token in stripped for token in ["讲讲", "说说", "展开", "详细"]):
+            return pick(["你先说是哪一个", "你具体说哪个", "等下，你说清楚一点"], stripped)
+        if any(token in stripped for token in ["无聊", "随便", "话题", "聊什么"]):
+            return pick(["那讲八卦\n我要听", "随便啊\n你今天有没有什么离谱的", "玩不玩\n或者讲点逆天的"], stripped)
+
+        cues = reply_cues(stripped)
         if cues:
             lowered = stripped.lower()
-            if any(token in lowered for token in ["xswl", "\u7b11\u6b7b", "\u7b11\u9f20", "\u7ef7", "\u868c\u57e0\u4f4f", "\u8349", "\u8279"]):
-                return pick(["6", "\u7ef7\u4e0d\u4f4f\u4e86", "\u54c8", "\u4ec0\u4e48\u4e1c\u897f\u554a"], stripped)
-            if any(token in stripped for token in ["\u5bc4", "\u4e38\u8fa3", "\u5b8c\u8fa3", "\u9ebb\u4e86", "\u7834\u9632", "\u6446\u70c2"]):
-                return pick(["\u5b8c\u4e86", "\u9ebb\u4e86", "\u5148\u522b\u5bc4", "\u8fd9\u4e5f\u592a\u79bb\u8c31\u4e86"], stripped)
-            if any(token in stripped for token in ["\u79bb\u8c31", "\u9006\u5929", "\u62bd\u8c61"]):
-                return pick(["\u9006\u5929", "\u6709\u70b9\u62bd\u8c61", "\u8fd9\u4ec0\u4e48", "6"], stripped)
-            if any(token in stripped for token in ["\u5c0a\u561f\u5047\u561f", "\u771f\u7684\u5047\u7684", "\u771f\u5047\u7684"]):
-                return pick(["\u554a\uff1f", "\u771f\u7684\u5047\u7684", "\u4ec0\u4e48", "\u4f60\u518d\u8bf4\u4e00\u904d"], stripped)
+            if any(token in lowered for token in ["xswl", "笑死", "笑鼠", "绷", "蚌埠住", "草", "艹"]):
+                return pick(["6", "绷不住了", "哈", "什么东西啊"], stripped)
+            if any(token in stripped for token in ["寄", "丸辣", "完辣", "麻了", "破防", "摆烂"]):
+                return pick(["完了", "麻了", "先别寄", "这也太离谱了"], stripped)
+            if any(token in stripped for token in ["离谱", "逆天", "抽象"]):
+                return pick(["逆天", "有点抽象", "这什么", "6"], stripped)
 
         candidates = self.extract_style_lines(memories)
-        if "?" in stripped or "\uff1f" in stripped:
+        if "?" in stripped or "？" in stripped:
             return pick(candidates + ["怎么说", "什么", "啊？"], stripped)
         return pick(candidates + ["6", "哈", "我靠", "你继续", "有点意思"], stripped)
 
-    def polish_model_reply(self, text: str, message: str, memories: list[dict[str, Any]]) -> str:
+    def polish_model_reply(
+        self,
+        text: str,
+        message: str,
+        memories: list[dict[str, Any]],
+        history: list[dict[str, Any]] | None = None,
+        conversation_memory: list[dict[str, Any]] | None = None,
+    ) -> str:
         cleaned = (text or "").strip()
         if not cleaned:
-            return self.local_reply(message, memories)
+            return self.local_reply(message, memories, conversation_memory)
         if re.fullmatch(r"[?？]{1,8}", cleaned):
             return self.softened_question_reply(message, memories)
-        if self.is_capability_question(message) and cleaned in {"\u4e0d\u77e5\u9053", "\u4e0d\u6e05\u695a", "\u8bf4\u4e0d\u6e05\u695a"}:
-            return self.local_reply(message, memories)
+        if cleaned in OVERUSED_STYLE_LINES:
+            return self.local_reply(message, memories, conversation_memory)
+        if self.is_repeated_reply(cleaned, history or []):
+            return self.repair_repeated_reply(message)
+        if self.is_capability_question(message) and cleaned in {"不知道", "不清楚", "说不清楚"}:
+            return self.local_reply(message, memories, conversation_memory)
         return cleaned
 
     def softened_question_reply(self, message: str, memories: list[dict[str, Any]]) -> str:
         digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
         allow_symbol = int(digest[:2], 16) % 100 < 20
         if allow_symbol:
-            return pick(["?", "\uff1f\uff1f", "\u554a\uff1f"], message)
+            return pick(["?", "？？", "啊？"], message)
         candidates = [line for line in self.extract_style_lines(memories) if not re.fullmatch(r"[?？!！。.,，、…~～]+", line)]
-        return pick(candidates + ["\u4ec0\u4e48", "\u600e\u4e48\u8bf4", "\u4f60\u8bf4", "\u554a"], message)
+        return pick(candidates + ["什么", "怎么说", "你说", "啊"], message)
+
+    def repair_repeated_reply(self, message: str) -> str:
+        stripped = message.strip()
+        if self.is_user_identity_question(stripped):
+            return pick(["NonForgetter啊", "你啊，NonForgetter", "你是 NonForgetter，这还要问"], stripped)
+        if self.is_bot_identity_question(stripped):
+            return pick(["backup啊", "那就叫乐乐", "你不是刚给我取名了吗"], stripped)
+        if self.is_meaning_question(stripped):
+            return self.meaning_reply(stripped)
+        return pick(["我换个说法", "刚刚那句不算", "等下，我重说", "不是那个意思"], stripped)
+
+    @staticmethod
+    def is_repeated_reply(reply: str, history: list[dict[str, Any]]) -> bool:
+        raw_reply = re.sub(r"\s+", "", reply or "")
+        normalized_reply = ChatEngine.normalize_for_repeat(reply)
+        recent = [
+            (re.sub(r"\s+", "", item.get("content", "")), ChatEngine.normalize_for_repeat(item.get("content", "")))
+            for item in history[-12:]
+            if item.get("role") == "assistant"
+        ][-6:]
+        for old_raw, old in recent:
+            if not old_raw:
+                continue
+            if raw_reply == old_raw or SequenceMatcher(None, raw_reply, old_raw).ratio() >= 0.72:
+                return True
+            if len(normalized_reply) < 4 or not old:
+                continue
+            if normalized_reply in old or old in normalized_reply:
+                return True
+            if SequenceMatcher(None, normalized_reply, old).ratio() >= 0.68:
+                return True
+        return False
+
+    @staticmethod
+    def normalize_for_repeat(text: str) -> str:
+        text = re.sub(r"[\s?？!！。.,，、…~～]", "", text or "")
+        for filler in ["刚不是说了嘛", "刚不是说了", "我还能咋办", "你赐的", "嘛", "呗"]:
+            text = text.replace(filler, "")
+        return text
+
+    @staticmethod
+    def filter_style_phrases(phrases: list[Any]) -> list[str]:
+        result = []
+        seen = set()
+        for phrase in phrases:
+            text = str(phrase).strip()
+            if is_usable_style_line(text) and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    @staticmethod
+    def should_route_locally(message: str) -> bool:
+        return (
+            ChatEngine.is_capability_question(message)
+            or ChatEngine.is_identity_question(message)
+            or ChatEngine.is_user_identity_question(message)
+            or ChatEngine.is_meaning_question(message)
+        )
 
     @staticmethod
     def is_capability_question(message: str) -> bool:
-        return any(token in message for token in ["\u5e2e\u6211\u505a\u4ec0\u4e48", "\u80fd\u505a\u4ec0\u4e48", "\u4f1a\u505a\u4ec0\u4e48", "\u53ef\u4ee5\u5e2e\u6211"])
+        return any(token in message for token in ["帮我做什么", "能做什么", "会做什么", "可以帮我"])
 
     @staticmethod
     def is_identity_question(message: str) -> bool:
-        return any(token in message for token in ["\u53eb\u4ec0\u4e48", "\u4ec0\u4e48\u540d\u5b57", "\u4f60\u662f\u8c01", "\u53eb\u5565"])
+        return ChatEngine.is_bot_identity_question(message) or any(token in message for token in ["叫什么", "什么名字", "叫啥"])
+
+    @staticmethod
+    def is_bot_identity_question(message: str) -> bool:
+        return any(token in message for token in ["你是谁", "你叫什么", "你叫啥", "你叫什么名字"])
+
+    @staticmethod
+    def is_user_identity_question(message: str) -> bool:
+        return any(token in message for token in ["我是谁", "我是你的谁", "我是你的什么人", "我是什么人", "我是你什么人"])
+
+    @staticmethod
+    def is_meaning_question(message: str) -> bool:
+        return any(token in message for token in ["什么意思", "啥意思", "什么含义", "何意味"])
+
+    @staticmethod
+    def meaning_reply(message: str) -> str:
+        if "乐乐" in message:
+            return pick(["就是你刚给我安的名字吧", "字面上就是乐那个乐，听着挺随便的", "大概就是个名字，没啥高深意思"], message)
+        return pick(["字面意思吧", "你说哪个词", "这个要看你前面怎么用的"], message)
 
     @staticmethod
     def extract_style_lines(memories: list[dict[str, Any]]) -> list[str]:
@@ -326,8 +421,6 @@ class ChatEngine:
                 if not line.startswith("user[text]:"):
                     continue
                 text = line.split(":", 1)[1].strip()
-                if text in OVERUSED_STYLE_LINES:
-                    continue
                 if is_usable_style_line(text) and text not in seen:
                     seen.add(text)
                     candidates.append(text)
