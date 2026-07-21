@@ -12,6 +12,7 @@ from chatbot_core.dataset import Dataset
 from chatbot_core.llm_runtime import RUNTIME_VERSION, ChatEngine
 from chatbot_core.persona_runtime import load_or_build_persona
 from chatbot_core.retrieval import Retriever
+from chatbot_core.store import ChatStore
 
 
 ROOT = Path(__file__).resolve().parent
@@ -22,6 +23,12 @@ PERSONA = load_or_build_persona(CONFIG, DATASET)
 BEHAVIOR = load_or_build_behavior(CONFIG, DATASET)
 RETRIEVER = Retriever(DATASET.load_chunks())
 ENGINE = ChatEngine(CONFIG, PERSONA, RETRIEVER)
+STORE = ChatStore(CONFIG.db_path)
+
+
+def conversation_id_from(value: object) -> str:
+    text = str(value or "default").strip()
+    return text[:80] or "default"
 
 
 def json_bytes(payload: object) -> bytes:
@@ -84,6 +91,7 @@ class Handler(BaseHTTPRequestHandler):
                     "chunk_count": DATASET.manifest.get("chunk_count"),
                     "date_range": DATASET.manifest.get("date_range"),
                     "behavior_version": BEHAVIOR.get("version"),
+                    "database": str(CONFIG.db_path),
                 }
             )
             return
@@ -97,18 +105,49 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/behavior":
             self.send_json(BEHAVIOR)
             return
+        if parsed.path == "/api/history":
+            conversation_id = conversation_id_from(parse_qs(parsed.query).get("conversation_id", ["default"])[0])
+            self.send_json(
+                {
+                    "conversation_id": conversation_id,
+                    "messages": STORE.load_messages(conversation_id),
+                    "memories": STORE.load_memories(conversation_id),
+                }
+            )
+            return
         self.send_json({"error": "not_found"}, 404)
 
     def do_POST(self) -> None:
         try:
             if self.path == "/api/chat":
                 payload = self.read_json()
-                message = str(payload.get("message", "")).strip()
-                history = payload.get("history", [])
+                conversation_id = conversation_id_from(payload.get("conversation_id"))
+                incoming = payload.get("messages")
+                if isinstance(incoming, list):
+                    parts = [str(item).strip() for item in incoming if str(item).strip()]
+                    message = "\n".join(parts)
+                else:
+                    parts = [str(payload.get("message", "")).strip()]
+                    message = parts[0]
+                history = STORE.load_messages(conversation_id, limit=80)
                 if not message:
                     self.send_json({"error": "empty_message"}, 400)
                     return
-                self.send_json(ENGINE.reply(message, history))
+                for part in parts:
+                    STORE.add_message(conversation_id, "user", part)
+                    STORE.remember_from_user_text(conversation_id, part)
+                context = STORE.load_memories(conversation_id)
+                result = ENGINE.reply(message, history, context)
+                STORE.add_message(conversation_id, "assistant", result.get("reply", ""))
+                result["conversation_id"] = conversation_id
+                result["conversation_memory"] = context
+                self.send_json(result)
+                return
+            if self.path == "/api/clear":
+                payload = self.read_json()
+                conversation_id = conversation_id_from(payload.get("conversation_id"))
+                STORE.clear_conversation(conversation_id)
+                self.send_json({"ok": True, "conversation_id": conversation_id})
                 return
             self.send_json({"error": "not_found"}, 404)
         except Exception as exc:

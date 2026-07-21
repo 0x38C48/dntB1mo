@@ -1,6 +1,7 @@
 const appShell = document.querySelector("#appShell");
 const statusEl = document.querySelector("#status");
 const ragBadge = document.querySelector("#ragBadge");
+const personaSummaryEl = document.querySelector("#personaSummary");
 const axesEl = document.querySelector("#personaAxes");
 const behaviorEl = document.querySelector("#behaviorBox");
 const messagesEl = document.querySelector("#messages");
@@ -15,7 +16,6 @@ const expandRight = document.querySelector("#expandRight");
 
 const t = {
   noMemory: "\u6682\u65e0\u76f8\u5173\u5386\u53f2\u7247\u6bb5",
-  thinking: "\u751f\u6210\u4e2d...",
   error: "\u51fa\u9519\u4e86\uff1a",
   failed: "\u8bf7\u6c42\u5931\u8d25\uff1a",
   hello: "\u55ef",
@@ -27,7 +27,11 @@ const profiles = {
   user: { name: "NonForgetter", avatar: "/static/assets/nonforgetter.jpg" },
 };
 
+const conversationId = "nonforgetter-default";
 let chatHistory = [];
+let pendingUserMessages = [];
+let pendingTimer = null;
+let sending = false;
 
 function hashString(value) {
   let hash = 2166136261;
@@ -44,10 +48,23 @@ function pickClient(items, seed) {
 
 function polishClientReply(reply, userText) {
   const cleaned = String(reply || "").trim();
-  if (/^[?？]{1,8}$/.test(cleaned) && hashString(userText) % 100 >= 20) {
+  if (/^[?\uFF1F]{1,8}$/.test(cleaned) && hashString(userText) % 100 >= 20) {
     return pickClient(["\u600e\u4e48\u8bf4", "\u4f60\u8bf4", "\u554a", "\u4ec0\u4e48"], userText);
   }
+  if (cleaned === "\u54fc" && hashString(userText) % 100 >= 12) {
+    return pickClient(["\u4f60\u7ee7\u7eed", "\u54c8", "\u4ec0\u4e48", "\u6211\u770b\u770b"], userText);
+  }
   return cleaned;
+}
+
+function wireAvatar(image, name) {
+  if (!image) return;
+  image.addEventListener("error", () => {
+    const fallback = document.createElement("div");
+    fallback.className = `${image.className} avatar-fallback`;
+    fallback.textContent = String(name || "?").slice(0, 1).toUpperCase();
+    image.replaceWith(fallback);
+  }, { once: true });
 }
 
 function addMessage(role, text) {
@@ -77,16 +94,6 @@ function addMessage(role, text) {
   return row;
 }
 
-function wireAvatar(image, name) {
-  if (!image) return;
-  image.addEventListener("error", () => {
-    const fallback = document.createElement("div");
-    fallback.className = `${image.className} avatar-fallback`;
-    fallback.textContent = String(name || "?").slice(0, 1).toUpperCase();
-    image.replaceWith(fallback);
-  }, { once: true });
-}
-
 function addTypingIndicator() {
   const node = addMessage("meta", "");
   node.classList.add("typing-row");
@@ -95,17 +102,12 @@ function addTypingIndicator() {
 }
 
 function addBotReply(text) {
-  const parts = String(text || "")
-    .split(/\n+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
+  const parts = String(text || "").split(/\n+/).map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) {
     addMessage("bot", "\uff1f");
     return;
   }
-  for (const part of parts) {
-    addMessage("bot", part);
-  }
+  for (const part of parts) addMessage("bot", part);
 }
 
 function renderMemories(memories) {
@@ -154,15 +156,15 @@ function renderBehavior(behavior) {
 
 async function loadStatus() {
   const status = await fetch("/api/status").then((r) => r.json());
-  statusEl.textContent = `${status.mode} · ${status.runtime_version || ""}`;
-  if (ragBadge && status.rag) {
-    ragBadge.textContent = "\u68d7/\u8c10\u97f3 RAG";
-  }
+  statusEl.textContent = `${status.mode} \u00b7 ${status.runtime_version || ""}`;
+  if (ragBadge && status.rag) ragBadge.textContent = "\u68d7/\u8c10\u97f3 RAG";
 }
 
 async function loadPersona() {
   const persona = await fetch("/api/persona").then((r) => r.json());
   axesEl.innerHTML = "";
+  const summary = persona.persona_summary || [];
+  personaSummaryEl.innerHTML = summary.map((item) => `<p>${item}</p>`).join("");
   const axes = persona.five_axes || {};
   for (const key of t.axes) {
     const axis = axes[key];
@@ -194,41 +196,77 @@ async function loadBehavior() {
   }
   try {
     const staticResponse = await fetch("/static/behavior_analysis.json");
-    if (staticResponse.ok) {
-      renderBehavior(await staticResponse.json());
-    }
+    if (staticResponse.ok) renderBehavior(await staticResponse.json());
   } catch (_) {
     behaviorEl.innerHTML = "";
   }
 }
 
-async function submitMessage() {
+async function loadHistory() {
+  try {
+    const data = await fetch(`/api/history?conversation_id=${encodeURIComponent(conversationId)}`).then((r) => r.json());
+    const rows = data.messages || [];
+    messagesEl.innerHTML = "";
+    chatHistory = [];
+    if (rows.length === 0) {
+      addMessage("bot", t.hello);
+      return;
+    }
+    for (const row of rows) {
+      addMessage(row.role === "assistant" ? "bot" : "user", row.content);
+      chatHistory.push({ role: row.role, content: row.content });
+    }
+  } catch (_) {
+    addMessage("bot", t.hello);
+  }
+}
+
+function submitMessage() {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
   resizeInput();
   addMessage("user", text);
   chatHistory.push({ role: "user", content: text });
+  pendingUserMessages.push(text);
+  if (pendingTimer) clearTimeout(pendingTimer);
+  pendingTimer = setTimeout(flushPendingMessages, 850);
+}
+
+async function flushPendingMessages() {
+  if (sending || pendingUserMessages.length === 0) return;
+  const batch = pendingUserMessages.splice(0);
+  sending = true;
   const meta = addTypingIndicator();
   try {
     const result = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ message: text, history: chatHistory.slice(-12) }),
+      body: JSON.stringify({ conversation_id: conversationId, messages: batch }),
     }).then((r) => r.json());
     meta.remove();
     if (result.error) {
       addMessage("bot", `${t.error}${result.error}`);
       return;
     }
-    const polished = polishClientReply(result.reply, text);
+    const polished = polishClientReply(result.reply, batch.join("\n"));
     addBotReply(polished);
     chatHistory.push({ role: "assistant", content: polished });
     renderMemories(result.memories || []);
   } catch (error) {
     meta.remove();
     addMessage("bot", `${t.failed}${error}`);
+  } finally {
+    sending = false;
+    if (pendingUserMessages.length > 0) {
+      pendingTimer = setTimeout(flushPendingMessages, 350);
+    }
   }
+}
+
+function resizeInput() {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 150)}px`;
 }
 
 form.addEventListener("submit", (event) => {
@@ -243,17 +281,19 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
-function resizeInput() {
-  input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, 150)}px`;
-}
-
 input.addEventListener("input", resizeInput);
 
-clearBtn.addEventListener("click", () => {
+clearBtn.addEventListener("click", async () => {
   chatHistory = [];
+  pendingUserMessages = [];
   messagesEl.innerHTML = "";
   renderMemories([]);
+  await fetch("/api/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ conversation_id: conversationId }),
+  });
+  addMessage("bot", t.hello);
 });
 
 collapseLeft.addEventListener("click", () => appShell.classList.add("left-collapsed"));
@@ -265,6 +305,6 @@ loadStatus();
 loadPersona();
 loadBehavior();
 renderMemories([]);
-addMessage("bot", t.hello);
+loadHistory();
 document.querySelectorAll("img").forEach((img) => wireAvatar(img, img.alt || "?"));
 resizeInput();

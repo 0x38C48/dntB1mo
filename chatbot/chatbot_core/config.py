@@ -11,6 +11,7 @@ class AppConfig:
     project_root: Path
     prepared_dir: Path
     persona_dir: Path
+    db_path: Path
     host: str
     port: int
     openai_api_key: str | None
@@ -28,6 +29,7 @@ class AppConfig:
             project_root=project_root,
             prepared_dir=Path(os.getenv("WECHAT_PREPARED_DIR", project_root / "wechat_prepared")),
             persona_dir=Path(os.getenv("PERSONA_DIR", root / "persona")),
+            db_path=Path(os.getenv("CHATBOT_DB_PATH", root / "chat_memory.db")),
             host=os.getenv("CHATBOT_HOST", "127.0.0.1"),
             port=int(os.getenv("CHATBOT_PORT", "8765")),
             openai_api_key=os.getenv("OPENAI_API_KEY"),

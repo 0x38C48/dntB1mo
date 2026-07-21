@@ -11,7 +11,29 @@ from .retrieval import Retriever
 from .slang import reply_cues
 
 
-RUNTIME_VERSION = "backup-user-style-v4"
+RUNTIME_VERSION = "backup-user-style-v5-memory-batch"
+
+
+PERSONA_NARRATIVE = [
+    "人格核心不是高频口癖，而是聊天姿态：反应快、句子短、会接梗，常用轻微吐槽和追问把对话续住。",
+    "对 NonForgetter 要像熟人聊天，不要把对方当陌生用户，也不要用客服式总结。",
+    "短回复可以用，但不要机械复读某个高频词；同一种口癖连续出现要主动换说法。",
+    "如果 NonForgetter 连续发多条消息，先把这些话当成同一轮表达理解，再决定是否逐点回应。",
+]
+
+OVERUSED_STYLE_LINES = {
+    "哼",
+    "嗯",
+    "嗯嗯",
+    "哦",
+    "好",
+    "啊",
+    "?",
+    "？",
+    "。",
+    "。。。",
+    "...",
+}
 
 
 def pick(items: list[str], seed: str) -> str:
@@ -46,19 +68,25 @@ class ChatEngine:
         else:
             self.mode = "local_fallback"
 
-    def reply(self, message: str, history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def reply(
+        self,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        conversation_memory: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         history = history or []
+        conversation_memory = conversation_memory or []
         memories = self.retriever.search(message, limit=10)
         if self.is_capability_question(message) or self.is_identity_question(message):
-            return {"reply": self.local_reply(message, memories), "mode": f"{self.mode}_local_route", "memories": memories}
-        prompt = self.build_prompt(message, history[-12:], memories)
+            return {"reply": self.local_reply(message, memories, conversation_memory), "mode": f"{self.mode}_local_route", "memories": memories}
+        prompt = self.build_prompt(message, history[-24:], memories, conversation_memory)
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
                 return {"reply": self.polish_model_reply(text, message, memories), "mode": self.mode, "memories": memories}
             except Exception as exc:
                 return {
-                    "reply": self.local_reply(message, memories),
+                    "reply": self.local_reply(message, memories, conversation_memory),
                     "mode": "local_fallback_after_sophnet_error",
                     "api_error": str(exc),
                     "memories": memories,
@@ -69,14 +97,20 @@ class ChatEngine:
                 return {"reply": self.polish_model_reply(text, message, memories), "mode": self.mode, "memories": memories}
             except Exception as exc:
                 return {
-                    "reply": self.local_reply(message, memories),
+                    "reply": self.local_reply(message, memories, conversation_memory),
                     "mode": "local_fallback_after_api_error",
                     "api_error": str(exc),
                     "memories": memories,
                 }
-        return {"reply": self.local_reply(message, memories), "mode": self.mode, "memories": memories}
+        return {"reply": self.local_reply(message, memories, conversation_memory), "mode": self.mode, "memories": memories}
 
-    def build_prompt(self, message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str:
+    def build_prompt(
+        self,
+        message: str,
+        history: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+        conversation_memory: list[dict[str, Any]],
+    ) -> str:
         axes = self.persona.get("five_axes", {})
         slang_cues = reply_cues(message)
         persona_brief = {
@@ -98,7 +132,13 @@ class ChatEngine:
                     "\u5982\u679c user[text] \u548c target[text] \u98ce\u683c\u51b2\u7a81\uff0c\u4ee5 user[text] \u4e3a\u51c6\u3002",
                 ],
                 "persona_five_axes": persona_brief,
+                "persona_narrative": PERSONA_NARRATIVE,
+                "current_user_identity": {
+                    "display_name": "NonForgetter",
+                    "instruction": "把正在聊天的人当作 NonForgetter。不要误把 NonForgetter 当作蒸馏对象，也不要把 backup 当作当前用户。",
+                },
                 "recent_history": history,
+                "conversation_memory": conversation_memory,
                 "retrieved_memories": memories,
                 "slang_and_homophone_cues": slang_cues,
                 "user_message": message,
@@ -109,6 +149,8 @@ class ChatEngine:
                     "\u53ef\u4ee5\u8f93\u51fa\u8fde\u7eed\u7b26\u53f7\uff0c\u4f8b\u5982\uff1f\uff1f\uff1f\u3001\u3002\u3002\u3002\u3001\u554a\uff1f\uff1f\uff1f\uff0c\u7528\u6765\u6a21\u62df\u60c5\u7eea\u3002",
                     "\u4f46\u4e0d\u8981\u8fc7\u5ea6\u4f7f\u7528\u7eaf\u95ee\u53f7\uff0c\u666e\u901a\u573a\u666f\u4f18\u5148\u7528 backup \u7684\u77ed\u53e5\u6216\u8ffd\u95ee\u3002",
                     "\u53ef\u4ee5\u8fde\u7eed\u56de\u7b54\u591a\u4e2a\u77ed\u53e5\uff0c\u4e5f\u53ef\u4ee5\u4e3b\u52a8\u629b\u51fa\u8bdd\u9898\u3002",
+                    "如果 user_message 里有多行，代表 NonForgetter 连续发送了多条消息。先整体理解，再决定是否分点回应，不要每一行机械回一句。",
+                    "top_short_phrases 只是风格参考，不是复读清单。不要因为某个词频高就反复输出，例如不要高频输出“哼”。",
                     "\u9047\u5230\u8c10\u97f3\u68d7\u3001\u7f51\u7edc\u68d7\u3001\u62fc\u97f3\u7f29\u5199\u65f6\uff0c\u4e0d\u8981\u673a\u68b0\u89e3\u91ca\uff0c\u800c\u662f\u6309\u8bed\u5883\u7075\u6d3b\u63a5\u4f4f\u60c5\u7eea\u548c\u7b11\u70b9\u3002",
                     "\u4e0d\u77e5\u9053\u7684\u4e8b\u5b9e\u8981\u627f\u8ba4\u4e0d\u786e\u5b9a\u3002",
                     "\u4e0d\u8981\u6cc4\u9732\u9690\u79c1\u3001\u8054\u7cfb\u65b9\u5f0f\u3001\u4f4f\u5740\u3001\u8eab\u4efd\u4fe1\u606f\u3002",
@@ -150,7 +192,7 @@ class ChatEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a concise Chinese chat style simulator for a consent-based local chatbot. Primary style source is backup/user-side messages. You may output single symbols, repeated symbols, multiple short replies, and proactive topic shifts when stylistically appropriate. Do not overuse pure question marks. Do not claim to be the real person.",
+                    "content": "You are a concise Chinese chat style simulator for a consent-based local chatbot. Primary style source is backup/user-side messages, but do not mechanically repeat high-frequency filler words. The current chatting user is NonForgetter. If multiple user lines arrive together, understand them as one turn before replying. Do not claim to be the real person.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -198,15 +240,26 @@ class ChatEngine:
             return "\n".join(parts)
         return ""
 
-    def local_reply(self, message: str, memories: list[dict[str, Any]]) -> str:
+    def local_reply(
+        self,
+        message: str,
+        memories: list[dict[str, Any]],
+        conversation_memory: list[dict[str, Any]] | None = None,
+    ) -> str:
         stripped = message.strip()
         cues = reply_cues(stripped)
         if not stripped:
             return "\u55ef\uff1f"
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if len(lines) > 1:
+            joined = " / ".join(lines[-3:])
+            if any(token in stripped for token in ["为什么", "咋", "怎么", "？", "?"]):
+                return pick(["等下\n我先看完", "你这是连着问我啊\n我想想", "你这几句要放一起看"], joined)
+            return pick(["我懂你意思了", "等下\n你这几句是连着的吧", "我先把你这几句当一件事看"], joined)
         if any(token in stripped for token in ["\u53eb\u4ec0\u4e48", "\u4ec0\u4e48\u540d\u5b57", "\u4f60\u662f\u8c01", "\u53eb\u5565"]):
             return pick(["\u4f60\u4e0d\u662f\u77e5\u9053\u561b", "\u8fd9\u8fd8\u8981\u95ee\u554a", "\u4f60\u60f3\u600e\u4e48\u53eb\u90fd\u884c"], stripped)
         if any(token in stripped for token in ["\u5e2e\u6211\u505a\u4ec0\u4e48", "\u80fd\u505a\u4ec0\u4e48", "\u4f1a\u505a\u4ec0\u4e48", "\u53ef\u4ee5\u5e2e\u6211"]):
-            return pick(["\u966a\u4f60\u804a\u5929\u554a", "\u4f60\u8bf4\uff0c\u6211\u542c\u7740", "\u4e71\u4e03\u516b\u7cdf\u7684\u4e5f\u53ef\u4ee5\u8bf4"], stripped)
+            return pick(["陪你聊天啊", "你说，我听着", "乱七八糟的也可以说"], stripped)
         if any(word in stripped for word in ["\u7d2f", "\u70e6", "\u96be\u53d7", "\u5d29\u6e83", "\u4e0d\u5f00\u5fc3"]):
             return pick(["\u5148\u522b\u786c\u6491\uff0c\u7f13\u4e00\u4e0b\u3002", "\u600e\u4e48\u4e86\uff0c\u4f60\u8bf4\u3002", "\u597d\u5566\uff0c\u5148\u522b\u628a\u81ea\u5df1\u903c\u592a\u7d27\u3002"], stripped)
         if stripped in {"hi", "hello", "\u4f60\u597d", "\u5728\u5417", "\u5728\u4e0d\u5728"}:
@@ -235,8 +288,8 @@ class ChatEngine:
 
         candidates = self.extract_style_lines(memories)
         if "?" in stripped or "\uff1f" in stripped:
-            return pick(candidates + ["?", "\uff1f\uff1f\uff1f", "\u4ec0\u4e48", "\u554a\uff1f"], stripped)
-        return pick(candidates + ["6", "\u55ef", "\u54c8", "\u6211\u9760", "\u4f60\u7ee7\u7eed"], stripped)
+            return pick(candidates + ["怎么说", "什么", "啊？"], stripped)
+        return pick(candidates + ["6", "哈", "我靠", "你继续", "有点意思"], stripped)
 
     def polish_model_reply(self, text: str, message: str, memories: list[dict[str, Any]]) -> str:
         cleaned = (text or "").strip()
@@ -273,6 +326,8 @@ class ChatEngine:
                 if not line.startswith("user[text]:"):
                     continue
                 text = line.split(":", 1)[1].strip()
+                if text in OVERUSED_STYLE_LINES:
+                    continue
                 if is_usable_style_line(text) and text not in seen:
                     seen.add(text)
                     candidates.append(text)

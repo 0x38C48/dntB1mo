@@ -24,15 +24,41 @@ def load_or_build_persona(config: AppConfig, dataset: Dataset) -> dict[str, Any]
     if path.exists():
         persona = json.loads(path.read_text(encoding="utf-8"))
         if persona.get("source", {}).get("style_role") == STYLE_ROLE:
-            return persona
+            enriched = enrich_persona(persona)
+            if enriched != persona:
+                path.write_text(json.dumps(enriched, ensure_ascii=False, indent=2), encoding="utf-8")
+            return enriched
     return build_and_save_persona(config, dataset)
 
 
 def build_and_save_persona(config: AppConfig, dataset: Dataset) -> dict[str, Any]:
-    persona = distill_persona(dataset)
+    persona = enrich_persona(distill_persona(dataset))
     config.persona_dir.mkdir(parents=True, exist_ok=True)
     (config.persona_dir / "persona.json").write_text(json.dumps(persona, ensure_ascii=False, indent=2), encoding="utf-8")
     (config.persona_dir / "persona.md").write_text(render_persona_md(persona), encoding="utf-8", newline="\n")
+    return persona
+
+
+def enrich_persona(persona: dict[str, Any]) -> dict[str, Any]:
+    persona = dict(persona)
+    persona["version"] = "0.3"
+    persona["persona_summary"] = [
+        "整体像熟人即时聊天：反应快、短句多、会接梗，会用轻微吐槽和追问把话题续住。",
+        "重点不是复读高频短词，而是保留节奏：先接住情绪，再看要不要继续追问或转话题。",
+        "对 NonForgetter 默认是熟悉关系，不要客服腔，不要把 NonForgetter 当作被蒸馏对象。",
+        "可以短、可以符号化，但要有上下文意识；连续多条消息要合在一起理解。",
+    ]
+    axes = persona.get("five_axes") or {}
+    speech_axis = axes.get("怎么说话")
+    if isinstance(speech_axis, dict):
+        phrases = speech_axis.get("top_short_phrases") or []
+        speech_axis["top_short_phrases"] = [
+            phrase for phrase in phrases if str(phrase).strip() not in {"哼", "嗯", "嗯嗯", "哦", "啊", "?", "？", "。", "。。。"}
+        ][:32]
+        speech_axis["summary"] = (
+            "表达上偏即时聊天：短句密、反应快、会接梗和轻微吐槽。"
+            "短回复是节奏工具，不是人格本身；需要避免机械重复单一口癖。"
+        )
     return persona
 
 

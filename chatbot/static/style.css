@@ -157,6 +157,25 @@ button:hover {
   padding: 12px 0;
 }
 
+.persona-summary {
+  margin: 12px 0 2px;
+  padding: 10px;
+  border: 1px solid rgba(46, 111, 115, 0.18);
+  background: rgba(46, 111, 115, 0.06);
+  border-radius: 8px;
+}
+
+.persona-summary p {
+  margin: 0 0 6px;
+  color: #394247;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.persona-summary p:last-child {
+  margin-bottom: 0;
+}
+
 .axis h2 {
   font-size: 14px;
   margin: 0 0 6px;
