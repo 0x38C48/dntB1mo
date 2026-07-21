@@ -17,6 +17,8 @@ chatbot/chatbot_core/persona.py
 .env.*
 chatbot/server.log
 chatbot/server.err.log
+chatbot/server-*.log
+chatbot/server-*.err.log
 
 # Python / editor cache
 __pycache__/
