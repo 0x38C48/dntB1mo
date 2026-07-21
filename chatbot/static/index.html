@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Persona Chatbot MVP</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="app-shell" id="appShell">
+      <aside class="side-panel persona-panel" aria-label="persona panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">&#20154;&#26684;&#19982;&#34892;&#20026;</div>
+            <div class="status-row">
+              <span class="live-dot" aria-hidden="true"></span>
+              <span id="status" class="status">loading</span>
+            </div>
+          </div>
+          <button class="icon-btn" id="collapseLeft" type="button" title="Collapse left">&#8249;</button>
+        </div>
+        <div id="personaAxes" class="axes"></div>
+        <div id="behaviorBox" class="behavior-box"></div>
+      </aside>
+
+      <section class="chat-panel">
+        <header class="chat-header">
+          <div class="identity">
+            <img src="/static/assets/backup.jpg" alt="backup avatar" class="header-avatar" />
+            <div>
+              <h1>backup</h1>
+              <p><span id="ragBadge">&#26816;&#32034;&#22686;&#24378;</span> · &#20197; backup/user &#20391;&#39118;&#26684;&#20026;&#20027;</p>
+            </div>
+          </div>
+          <div class="header-actions">
+            <button id="clearBtn" type="button">&#28165;&#31354;</button>
+          </div>
+        </header>
+        <div id="messages" class="messages"></div>
+        <form id="chatForm" class="composer">
+          <textarea id="messageInput" rows="2" placeholder="&#22238;&#36710;&#21457;&#36865;&#65292;Shift+Enter &#25442;&#34892;" autocomplete="off"></textarea>
+          <button type="submit" title="Enter">&#21457;&#36865;</button>
+        </form>
+      </section>
+
+      <aside class="side-panel memory-panel" aria-label="memory panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">&#26816;&#32034;&#35760;&#24518;</div>
+            <div class="status">&#26368;&#22810;&#26174;&#31034; 10 &#26465;</div>
+          </div>
+          <button class="icon-btn" id="collapseRight" type="button" title="Collapse right">&#8250;</button>
+        </div>
+        <div id="memories" class="memories"></div>
+      </aside>
+
+      <button class="rail rail-left" id="expandLeft" type="button">&#20154;&#26684;</button>
+      <button class="rail rail-right" id="expandRight" type="button">&#35760;&#24518;</button>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+# Private source data
+records/
+wechat_prepared/
+sticker_candidates/
+
+# Derived private persona artifacts
+chatbot/persona/
+chatbot/static/behavior_analysis.json
+chatbot/static/assets/
+
+# Superseded early runtime drafts
+chatbot/chatbot_core/llm.py
+chatbot/chatbot_core/persona.py
+
+# Secrets and local runtime
+.env
+.env.*
+chatbot/server.log
+chatbot/server.err.log
+
+# Python / editor cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
