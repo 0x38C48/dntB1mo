@@ -15,7 +15,7 @@ from .slang import reply_cues
 from .textfix import fix_text
 
 
-RUNTIME_VERSION = "backup-user-style-v12-habit-memory-cmd-ui"
+RUNTIME_VERSION = "backup-user-style-v13-fact-strategy"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -142,14 +142,17 @@ class ChatEngine:
         message = fix_text(message)
         history = self.fix_history(history or [])
         conversation_memory = conversation_memory or []
+        fact_domain = self.classify_fact_domain(message)
         retrieval_query = self.build_retrieval_query(message, history)
         memories = self.retriever.search(retrieval_query, limit=10)
+        temporary_facts = self.extract_temporary_facts(message, memories, fact_domain)
         emotion = self.resolve_emotion(message, history, mood)
 
         fact_reply = self.fact_first_reply(message, history, memories)
         if fact_reply:
+            fact_text = fact_reply if self.allows_long_reply(message) else compact_reply(fact_reply, FACT_MAX_REPLY_CHARS)
             return {
-                "reply": compact_reply(fact_reply, FACT_MAX_REPLY_CHARS),
+                "reply": fact_text,
                 "mode": f"{self.mode}_fact_route",
                 "emotion": emotion,
                 "facts": self.public_facts(),
@@ -174,7 +177,7 @@ class ChatEngine:
                 "memories": memories,
             }
 
-        prompt = self.build_prompt(message, history[-28:], memories, conversation_memory, emotion)
+        prompt = self.build_prompt(message, history[-28:], memories, conversation_memory, emotion, fact_domain, temporary_facts)
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
@@ -228,6 +231,8 @@ class ChatEngine:
         memories: list[dict[str, Any]],
         conversation_memory: list[dict[str, Any]],
         emotion: str,
+        fact_domain: str,
+        temporary_facts: dict[str, Any],
     ) -> str:
         axes = self.persona.get("five_axes", {})
         persona_brief = {
@@ -255,7 +260,10 @@ class ChatEngine:
             },
             "style_dna": STYLE_DNA,
             "emotion_state": emotion,
+            "fact_domain": fact_domain,
             "identity_and_timeline_facts": self.public_facts(),
+            "temporary_facts_from_retrieval": temporary_facts,
+            "fact_retrieval_policy": self.facts.get("retrieval_policy", {}),
             "persona_five_axes": persona_brief,
             "recent_history": history,
             "conversation_evidence": self.extract_conversation_evidence(message, history),
@@ -276,6 +284,8 @@ class ChatEngine:
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
                 "身份/名字/时间/是否说过的问题必须优先使用 identity_and_timeline_facts 和 retrieved_memories。",
+                "生日、情感经历、情绪起伏等事实问题必须先使用 temporary_facts_from_retrieval；证据不足只能说像是/没稳，不要编。",
+                "如果 temporary_facts_from_retrieval 已经足够回答，只做语气压缩，不要改事实。",
                 "有明确证据时不要说“不知道/没印象”。",
                 "top_short_phrases 只是风格参考，不是复读清单。",
                 "避免重复 recent_assistant_replies 中的句式；意思接近也要换角度。",
@@ -447,12 +457,62 @@ class ChatEngine:
                 )
             if name:
                 return pick([name, f"{name}吧", f"就{name}"], stripped)
+        if self.is_birthday_question(stripped):
+            return self.birthday_reply(stripped)
+        if self.is_relationship_question(stripped):
+            return self.relationship_reply(stripped)
+        if self.is_emotion_history_question(stripped):
+            return self.emotion_history_reply(stripped)
         if self.is_wake_time_question(stripped):
             return self.wake_time_reply(memories)
         if self.is_time_question(stripped):
             return self.time_reply(stripped)
         if self.is_memory_dispute_question(stripped) and self.has_memory_evidence(stripped, history, memories):
             return self.memory_evidence_reply(stripped, history, memories)
+        return None
+
+    def birthday_reply(self, message: str) -> str | None:
+        person = "backup"
+        if any(token in message for token in ["我生日", "我的生日", "我哪天", "我几号"]):
+            person = "NonForgetter"
+        if any(token in message for token in ["你生日", "你的生日", "你哪天", "你几号"]):
+            person = "backup"
+        candidates = (self.facts.get("birthdays", {}).get(person) or [])[:3]
+        if not candidates:
+            return "记录里没稳"
+        top = candidates[0]
+        if top.get("score", 0) <= 1 and len(candidates) > 1:
+            return f"{top.get('value')}\n但没很稳"
+        return f"{top.get('value')}\n像是这个"
+
+    def relationship_reply(self, message: str) -> str | None:
+        categories = self.facts.get("relationship_history", {}).get("categories") or []
+        if not categories:
+            return None
+        values = [item.get("value") for item in categories[:5]]
+        if self.allows_long_reply(message):
+            return "挺熟\n会拉扯\n会吵也会哄\n照顾也多"
+        if "conflict" in values and "repair" in values:
+            return "有拉扯\n也有哄"
+        if "care" in values and "affection" in values:
+            return "挺熟的\n有照顾"
+        if values:
+            return "记录里有\n得看片段"
+        return None
+
+    def emotion_history_reply(self, message: str) -> str | None:
+        emotions = self.facts.get("emotion_patterns", {}).get("backup") or []
+        if not emotions:
+            return None
+        values = [item.get("value") for item in emotions[:4]]
+        if self.allows_long_reply(message):
+            return "困累很多\n会低落\n也会生气\n但能接梗"
+        if "low" in values and "angry" in values:
+            return "起伏挺大\n会低落会炸"
+        if "sleepy_tired" in values:
+            return "常见是困累"
+        if values:
+            return "有波动\n记录里能看"
         return None
 
     def time_reply(self, message: str) -> str:
@@ -565,6 +625,36 @@ class ChatEngine:
 
     def public_facts(self) -> dict[str, Any]:
         start = self.facts.get("relationship", {}).get("known_since") or self.facts.get("date_range", {}).get("start")
+        birthdays = {
+            key: [
+                {
+                    "value": item.get("value"),
+                    "score": item.get("score"),
+                    "evidence": (item.get("evidence") or [])[:2],
+                }
+                for item in values[:3]
+            ]
+            for key, values in (self.facts.get("birthdays") or {}).items()
+        }
+        relationship = [
+            {
+                "value": item.get("value"),
+                "score": item.get("score"),
+                "evidence": (item.get("evidence") or [])[:2],
+            }
+            for item in (self.facts.get("relationship_history", {}).get("categories") or [])[:6]
+        ]
+        emotions = {
+            key: [
+                {
+                    "value": item.get("value"),
+                    "score": item.get("score"),
+                    "evidence": (item.get("evidence") or [])[:2],
+                }
+                for item in values[:5]
+            ]
+            for key, values in (self.facts.get("emotion_patterns") or {}).items()
+        }
         return {
             "persona_display": self.facts.get("persona_display", "backup"),
             "current_user": self.facts.get("current_user", "NonForgetter"),
@@ -574,6 +664,9 @@ class ChatEngine:
             "known_duration_days": days_since(start, datetime.now()),
             "name_evidence": (self.facts.get("identity", {}).get("name_candidates") or [])[:3],
             "english_name_evidence": (self.facts.get("identity", {}).get("english_name_candidates") or [])[:3],
+            "birthdays": birthdays,
+            "relationship_brief": relationship,
+            "emotion_brief": emotions,
         }
 
     @staticmethod
@@ -701,6 +794,7 @@ class ChatEngine:
             or ChatEngine.is_meaning_question(message)
             or ChatEngine.is_time_question(message)
             or ChatEngine.is_wake_time_question(message)
+            or ChatEngine.is_birthday_question(message)
         )
 
     @staticmethod
@@ -715,10 +809,22 @@ class ChatEngine:
             if item.get("role") == "user" and item.get("content")
         ][-5:]
         expansions = []
+        domain = ChatEngine.classify_fact_domain(message)
         if ChatEngine.is_bot_identity_question(message):
             expansions.extend(["名字 姓 林 薇 艺 英文名 lily 猜名字"])
         if ChatEngine.is_time_question(message):
             expansions.extend(["认识 多久 开始 聊天 第一条"])
+        if domain == "birthday":
+            expansions.extend(["生日 生快 生日快乐 几号 哪天 出生 过生日 今天生日 明天生日"])
+        if domain == "relationship":
+            expansions.extend(
+                [
+                    "感情 情感经历 关系 喜欢 爱 想你 抱抱 陪你",
+                    "吵架 生气 冷暴力 对不起 道歉 和好 原谅 别生气 不理",
+                ]
+            )
+        if domain == "emotion":
+            expansions.extend(["情绪 心情 难受 伤心 生气 哭 emo 破防 委屈 崩溃 困 累 起伏"])
         if ChatEngine.is_wake_time_question(message):
             expansions.extend(
                 [
@@ -727,6 +833,71 @@ class ChatEngine:
                 ]
             )
         return "\n".join([message, *recent_user_text, *expansions])
+
+    @staticmethod
+    def classify_fact_domain(message: str) -> str:
+        if ChatEngine.is_bot_identity_question(message) or ChatEngine.is_user_identity_question(message):
+            return "identity"
+        if ChatEngine.is_birthday_question(message):
+            return "birthday"
+        if ChatEngine.is_relationship_question(message):
+            return "relationship"
+        if ChatEngine.is_emotion_history_question(message):
+            return "emotion"
+        if ChatEngine.is_wake_time_question(message):
+            return "habit"
+        if ChatEngine.is_time_question(message):
+            return "time"
+        if ChatEngine.is_memory_dispute_question(message):
+            return "memory_dispute"
+        if ChatEngine.is_slang_meaning_question(message):
+            return "slang"
+        return "open_chat"
+
+    @staticmethod
+    def extract_temporary_facts(message: str, memories: list[dict[str, Any]], domain: str) -> dict[str, Any]:
+        terms = ChatEngine.domain_terms(domain)
+        evidence: list[dict[str, str]] = []
+        for memory in memories:
+            chunk_id = str(memory.get("chunk_id") or "")
+            timestamp = str(memory.get("start_time") or "")
+            for raw_line in fix_text(memory.get("text") or "").splitlines():
+                if not raw_line.startswith(("user[text]:", "target[text]:")):
+                    continue
+                role, text = raw_line.split(":", 1)
+                text = text.strip()
+                if not text:
+                    continue
+                if terms and not any(term in text for term in terms):
+                    continue
+                evidence.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "timestamp": timestamp,
+                        "role": role.removesuffix("[text]"),
+                        "text": text[:160],
+                    }
+                )
+                if len(evidence) >= 10:
+                    break
+            if len(evidence) >= 10:
+                break
+        return {
+            "domain": domain,
+            "evidence_count": len(evidence),
+            "evidence": evidence,
+            "rule": "这些只是本轮临时事实；回答必须以它们和 facts.json 为准，不能自行补确定事实。",
+        }
+
+    @staticmethod
+    def domain_terms(domain: str) -> list[str]:
+        return {
+            "birthday": ["生日", "生快", "生日快乐", "几号", "哪天", "出生", "过生日"],
+            "relationship": ["喜欢", "爱", "想你", "抱抱", "陪你", "吵架", "生气", "冷暴力", "对不起", "和好", "原谅", "别生气", "不理"],
+            "emotion": ["难受", "伤心", "生气", "哭", "emo", "破防", "委屈", "崩溃", "困", "累", "没睡醒", "烦"],
+            "habit": ["起床", "睡醒", "醒了", "还没起", "起不来", "没睡醒", "几点醒", "几点起"],
+            "memory_dispute": ["说过", "记得", "记错", "没说过", "绝对没有"],
+        }.get(domain, [])
 
     @staticmethod
     def extract_conversation_evidence(message: str, history: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -760,6 +931,50 @@ class ChatEngine:
     @staticmethod
     def is_time_question(message: str) -> bool:
         return any(token in message for token in ["聊了多久", "认识多久", "认识多长", "多久了", "什么时候认识", "哪天认识"])
+
+    @staticmethod
+    def is_birthday_question(message: str) -> bool:
+        return any(token in message for token in ["生日", "生快", "几号出生", "哪天出生", "出生日期"])
+
+    @staticmethod
+    def is_relationship_question(message: str) -> bool:
+        return any(
+            token in message
+            for token in [
+                "感情经历",
+                "情感经历",
+                "我们关系",
+                "什么关系",
+                "关系怎么样",
+                "喜欢过",
+                "爱过",
+                "吵过",
+                "吵架",
+                "和好",
+                "冷暴力",
+                "分手",
+                "情感",
+            ]
+        )
+
+    @staticmethod
+    def is_emotion_history_question(message: str) -> bool:
+        return any(
+            token in message
+            for token in [
+                "情绪起伏",
+                "情绪",
+                "心情",
+                "低落",
+                "难受",
+                "生气",
+                "哭过",
+                "emo",
+                "破防",
+                "委屈",
+                "崩溃",
+            ]
+        )
 
     @staticmethod
     def is_wake_time_question(message: str) -> bool:
