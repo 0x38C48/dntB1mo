@@ -15,10 +15,11 @@ from .slang import reply_cues
 from .textfix import fix_text
 
 
-RUNTIME_VERSION = "backup-user-style-v10-style-compact"
+RUNTIME_VERSION = "backup-user-style-v11-micro-bubbles"
 
-DEFAULT_MAX_REPLY_CHARS = 54
-FACT_MAX_REPLY_CHARS = 28
+DEFAULT_MAX_REPLY_CHARS = 28
+FACT_MAX_REPLY_CHARS = 18
+BUBBLE_MAX_CHARS = 12
 
 
 NUWA_PROTOCOL = [
@@ -73,26 +74,43 @@ def compact_reply(text: str, max_chars: int = DEFAULT_MAX_REPLY_CHARS) -> str:
         return ""
     text = re.sub(r"^(根据|从|按)(聊天记录|记录|事实卡|检索结果)[，,:：]?", "", text)
     text = re.sub(r"(我查到|可以看到|证据显示)[，,:：]?", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= max_chars:
-        return text
+    text = re.sub(r"你是不是在[^，。！？?\n]{0,12}", "你又来了", text)
+    text = re.sub(r"你复读机[^，。！？?\n]{0,12}", "复读机啊", text)
+    text = re.sub(r"你今天跟这[^，。！？?\n]{0,16}", "过不去了是吧", text)
+    text = text.replace("又嘻嘻，", "嘻嘻")
+    text = text.replace("又来了，什么又", "什么又")
+    text = text.replace("那咋了那咋了，", "那咋了")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text).strip()
 
-    parts = [part.strip() for part in re.split(r"[\n。；;，,]+", text) if part.strip()]
-    picked: list[str] = []
-    total = 0
+    parts = [part.strip() for part in re.split(r"[\n。；;，,！!？?]+", text) if part.strip()]
+    if not parts:
+        return text[:min(max_chars, BUBBLE_MAX_CHARS)]
+
+    bubbles: list[str] = []
     for part in parts:
-        if len(part) > max_chars:
-            part = part[:max_chars]
-        next_total = total + len(part)
-        if picked and next_total > max_chars:
+        short = shrink_bubble(part)
+        if short and short not in bubbles:
+            bubbles.append(short)
+        if len(bubbles) >= 2:
             break
-        picked.append(part)
-        total = next_total
-        if len(picked) >= 2:
-            break
-    if picked:
-        return "\n".join(picked)
-    return text[:max_chars]
+    if not bubbles:
+        bubbles = [text[:BUBBLE_MAX_CHARS]]
+
+    joined = "\n".join(bubbles)
+    if len(joined) <= max_chars:
+        return joined
+    return "\n".join(bubbles[:1])
+
+
+def shrink_bubble(text: str) -> str:
+    text = text.strip()
+    if len(text) <= BUBBLE_MAX_CHARS:
+        return text
+    for marker in ("是吧", "吧", "啊", "嘛", "呢", "啦", "了", "？", "?"):
+        idx = text.find(marker)
+        if idx >= 0 and idx + len(marker) <= BUBBLE_MAX_CHARS + 2:
+            return text[: idx + len(marker)]
+    return text[:BUBBLE_MAX_CHARS]
 
 
 class ChatEngine:
@@ -248,9 +266,11 @@ class ChatEngine:
             "slang_and_homophone_cues": reply_cues(message),
             "user_message": message,
             "output_rules": [
-                "默认像微信短消息：1-2个短句，单句尽量不超过18个中文字符。",
+                "默认像微信短消息：1-2个短泡泡，单泡泡尽量不超过12个中文字符。",
                 "除非用户明确要求详细，不要解释来龙去脉，不要写完整报告句。",
-                "事实只点到即可，比如“林薇艺，lily”或“2024-10-13开始的”。",
+                "能说“又来了”就不要说“你是不是又在……”。",
+                "避免固定长模板：“你是不是…是吧”“你今天跟…过不去了吧”这类句式少用。",
+                "事实只点到即可，比如“林薇艺\\nlily”或“2024-10-13”。",
                 "优先保留个人语气：吐槽、反问、停顿、轻微敷衍可以有，别太端着。",
                 "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
                 "只输出回复正文，不解释检索过程。",
@@ -272,11 +292,11 @@ class ChatEngine:
             "input": [
                 {
                     "role": "system",
-                    "content": "You are a concise Chinese chat style simulator. Use evidence before facts. Avoid repetition.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in 1-2 micro chat bubbles, usually under 12 Chinese chars each. Evidence outranks improvisation, but never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
-            "max_output_tokens": 120,
+            "max_output_tokens": 80,
         }
         request = urllib.request.Request(
             f"{self.config.openai_base_url.rstrip('/')}/responses",
@@ -298,7 +318,7 @@ class ChatEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You simulate backup's concise Chinese WeChat style. Reply in 1-2 short chat bubbles. Evidence outranks improvisation, but never sound like a report.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in 1-2 micro chat bubbles, usually under 12 Chinese chars each. Evidence outranks improvisation, but never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -419,14 +439,14 @@ class ChatEngine:
             if name and english:
                 return pick(
                     [
-                        f"{name}，{english}",
-                        f"{name}吧\n{english}也有",
-                        f"你不是猜到{name}了吗",
+                        f"{name}\n{english}",
+                        f"{name}吧",
+                        f"{english}也有",
                     ],
                     stripped,
                 )
             if name:
-                return pick([f"{name}吧", f"就{name}", f"你不是猜到{name}了吗"], stripped)
+                return pick([name, f"{name}吧", f"就{name}"], stripped)
         if self.is_time_question(stripped):
             return self.time_reply(stripped)
         if self.is_memory_dispute_question(stripped) and self.has_memory_evidence(stripped, history, memories):
@@ -439,7 +459,7 @@ class ChatEngine:
         date = (start or "2024-10-13")[:10]
         return pick(
             [
-                f"{date}开始的吧",
+                date,
                 f"{date}\n挺久了",
                 f"从{date}算",
             ],
@@ -559,12 +579,12 @@ class ChatEngine:
             + [str(memory.get("text", "")) for memory in memories[:4]]
         )
         if "林薇艺" in haystack or "姓林" in haystack:
-            return "有，林薇艺这个我刚才没接上"
+            return "有\n林薇艺"
         if "lily" in haystack.lower():
-            return "有，lily这个英文名记录里也有"
+            return "有\nlily"
         if "乐乐" in haystack:
-            return "有，乐乐这个要按梗和上下文看"
-        return "有相关的，我刚才没接上"
+            return "乐乐那个梗吧"
+        return "有\n我刚漏了"
 
     @staticmethod
     def filter_style_phrases(phrases: list[Any]) -> list[str]:
