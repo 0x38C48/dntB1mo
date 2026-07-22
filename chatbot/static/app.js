@@ -19,7 +19,7 @@ const t = {
   noMemory: "\u6682\u65e0\u76f8\u5173\u5386\u53f2\u7247\u6bb5",
   error: "\u51fa\u9519\u4e86\uff1a",
   failed: "\u8bf7\u6c42\u5931\u8d25\uff1a",
-  hello: "\u55ef",
+  helloImage: "/static/assets/hello.jpg",
   axes: ["\u600e\u4e48\u8bf4\u8bdd", "\u600e\u4e48\u60f3", "\u600e\u4e48\u5224\u65ad", "\u4ec0\u4e48\u4e0d\u505a", "\u77e5\u9053\u5c40\u9650"],
 };
 
@@ -90,6 +90,23 @@ function addMessage(role, text) {
   `;
   wireAvatar(row.querySelector(".avatar"), profile.name);
   row.querySelector(".bubble").textContent = text;
+  messagesEl.appendChild(row);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return row;
+}
+
+function addImageMessage(role, src, alt = "") {
+  const profile = profiles[role] || profiles.bot;
+  const row = document.createElement("div");
+  row.className = `msg-row ${role}`;
+  row.innerHTML = `
+    <img class="avatar" src="${profile.avatar}" alt="${profile.name}">
+    <div class="msg-stack">
+      <div class="nickname">${profile.name}</div>
+      <div class="bubble image-bubble"><img class="message-image" src="${src}" alt="${alt}"></div>
+    </div>
+  `;
+  wireAvatar(row.querySelector(".avatar"), profile.name);
   messagesEl.appendChild(row);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return row;
@@ -231,7 +248,7 @@ async function loadHistory() {
     messagesEl.innerHTML = "";
     chatHistory = [];
     if (rows.length === 0) {
-      addMessage("bot", t.hello);
+      addImageMessage("bot", t.helloImage, "hello");
       return;
     }
     for (const row of rows) {
@@ -239,7 +256,7 @@ async function loadHistory() {
       chatHistory.push({ role: row.role, content: row.content });
     }
   } catch (_) {
-    addMessage("bot", t.hello);
+    addImageMessage("bot", t.helloImage, "hello");
   }
 }
 
@@ -315,7 +332,7 @@ clearBtn.addEventListener("click", async () => {
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ conversation_id: conversationId }),
   });
-  addMessage("bot", t.hello);
+  addImageMessage("bot", t.helloImage, "hello");
 });
 
 collapseLeft.addEventListener("click", () => appShell.classList.add("left-collapsed"));

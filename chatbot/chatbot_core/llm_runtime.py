@@ -15,7 +15,7 @@ from .slang import reply_cues
 from .textfix import fix_text
 
 
-RUNTIME_VERSION = "backup-user-style-v11-micro-bubbles"
+RUNTIME_VERSION = "backup-user-style-v12-habit-memory-cmd-ui"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -447,6 +447,8 @@ class ChatEngine:
                 )
             if name:
                 return pick([name, f"{name}吧", f"就{name}"], stripped)
+        if self.is_wake_time_question(stripped):
+            return self.wake_time_reply(memories)
         if self.is_time_question(stripped):
             return self.time_reply(stripped)
         if self.is_memory_dispute_question(stripped) and self.has_memory_evidence(stripped, history, memories):
@@ -465,6 +467,101 @@ class ChatEngine:
             ],
             message,
         )
+
+    def wake_time_reply(self, memories: list[dict[str, Any]]) -> str:
+        samples: list[tuple[float, str]] = []
+        for memory in memories:
+            timestamp = str(memory.get("start_time") or "")
+            chunk_hour = self.hour_from_timestamp(timestamp)
+            for raw_line in fix_text(memory.get("text") or "").splitlines():
+                if not raw_line.startswith("user[text]:"):
+                    continue
+                line = raw_line.split(":", 1)[1].strip()
+                if not self.is_wake_evidence_line(line):
+                    continue
+                explicit = self.hour_from_text(line)
+                if explicit is not None and self.looks_like_sleep_time_line(line):
+                    continue
+                if explicit is not None:
+                    samples.append((explicit, line))
+                    continue
+                if chunk_hour is not None:
+                    if any(token in line for token in ["还没起", "起不来", "没睡醒"]):
+                        samples.append((max(chunk_hour + 1, 11), line))
+                    elif any(token in line for token in ["才起床", "刚起床", "刚睡醒", "睡醒了", "醒了", "起床"]):
+                        samples.append((chunk_hour, line))
+
+        if not samples:
+            return "记录里没准点\n但不像六点"
+
+        weighted = sorted(samples, key=lambda item: item[0])
+        median = weighted[len(weighted) // 2][0]
+        if median < 9 and any(hour >= 11 for hour, _ in weighted):
+            median = sorted(hour for hour, _ in weighted if hour >= 10)[0]
+        if median >= 15:
+            guess = "中午到下午吧"
+        elif median >= 12:
+            guess = "十二点前后吧"
+        elif median >= 10.5:
+            guess = "十一二点吧"
+        else:
+            guess = "十点多吧"
+        return f"{guess}\n不像六点"
+
+    @staticmethod
+    def is_wake_evidence_line(line: str) -> bool:
+        if any(token in line for token in ["你起", "你醒", "你什么时候", "叫醒了她", "我爸醒", "他起床", "ropz"]):
+            return False
+        return any(
+            token in line
+            for token in ["起床", "睡醒", "醒了", "没睡醒", "还没起", "起不来", "才起床", "刚起床", "几点醒", "几点起"]
+        )
+
+    @staticmethod
+    def looks_like_sleep_time_line(line: str) -> bool:
+        return any(token in line for token in ["几点睡", "什么时候睡", "睡啊", "睡觉", "睡着", "晚安"])
+
+    @staticmethod
+    def hour_from_timestamp(timestamp: str) -> float | None:
+        try:
+            return float(datetime.strptime(timestamp[:19], "%Y-%m-%d %H:%M:%S").hour)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def hour_from_text(line: str) -> float | None:
+        match = re.search(r"(\d{1,2}|[一二两三四五六七八九十]{1,3})点(半|多)?", line)
+        if not match:
+            return None
+        hour = ChatEngine.parse_cn_hour(match.group(1))
+        if hour is None:
+            return None
+        if match.group(2) == "半":
+            hour += 0.5
+        elif match.group(2) == "多":
+            hour += 0.3
+        if any(token in line for token in ["下午", "中午"]) and hour < 8:
+            hour += 12
+        return hour
+
+    @staticmethod
+    def parse_cn_hour(value: str) -> float | None:
+        if value.isdigit():
+            hour = int(value)
+            return float(hour) if 0 <= hour <= 24 else None
+        digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        if value == "十":
+            return 10.0
+        if value.startswith("十") and len(value) == 2:
+            return float(10 + digits.get(value[1], 0))
+        if value.endswith("十") and len(value) == 2:
+            return float(digits.get(value[0], 0) * 10)
+        if "十" in value:
+            left, right = value.split("十", 1)
+            return float(digits.get(left, 1) * 10 + digits.get(right, 0))
+        if value in digits:
+            return float(digits[value])
+        return None
 
     def public_facts(self) -> dict[str, Any]:
         start = self.facts.get("relationship", {}).get("known_since") or self.facts.get("date_range", {}).get("start")
@@ -603,6 +700,7 @@ class ChatEngine:
             ChatEngine.is_capability_question(message)
             or ChatEngine.is_meaning_question(message)
             or ChatEngine.is_time_question(message)
+            or ChatEngine.is_wake_time_question(message)
         )
 
     @staticmethod
@@ -621,6 +719,13 @@ class ChatEngine:
             expansions.extend(["名字 姓 林 薇 艺 英文名 lily 猜名字"])
         if ChatEngine.is_time_question(message):
             expansions.extend(["认识 多久 开始 聊天 第一条"])
+        if ChatEngine.is_wake_time_question(message):
+            expansions.extend(
+                [
+                    "几点起床 几点醒 睡醒 醒了 起床 起了 还没起床 还没起 没睡醒 起不来",
+                    "十一点多 十二点 一点多 中午 下午 才起床 刚睡醒 自然醒",
+                ]
+            )
         return "\n".join([message, *recent_user_text, *expansions])
 
     @staticmethod
@@ -655,6 +760,23 @@ class ChatEngine:
     @staticmethod
     def is_time_question(message: str) -> bool:
         return any(token in message for token in ["聊了多久", "认识多久", "认识多长", "多久了", "什么时候认识", "哪天认识"])
+
+    @staticmethod
+    def is_wake_time_question(message: str) -> bool:
+        return any(
+            token in message
+            for token in [
+                "几点起床",
+                "几点起",
+                "几点醒",
+                "什么时候起床",
+                "什么时候醒",
+                "一般几点起",
+                "一般几点醒",
+                "起床时间",
+                "睡到几点",
+            ]
+        )
 
     @staticmethod
     def is_meaning_question(message: str) -> bool:

@@ -1,17 +1,17 @@
 :root {
-  --bg: #eef1f0;
-  --panel: #fbfaf6;
-  --panel-2: #f3efe6;
-  --ink: #202426;
-  --muted: #667176;
-  --line: #d9d5cb;
-  --user: #cfeee9;
-  --bot: #f0e5cf;
-  --accent: #2e6f73;
-  --accent-dark: #24575a;
-  --warm: #d87b4a;
-  --shadow: 0 14px 38px rgba(29, 35, 38, 0.12);
-  --soft-shadow: 0 8px 20px rgba(29, 35, 38, 0.08);
+  --bg: #050604;
+  --panel: rgba(8, 10, 9, 0.76);
+  --panel-2: rgba(27, 31, 28, 0.82);
+  --ink: #ede9dc;
+  --muted: #aaa79c;
+  --line: rgba(237, 233, 220, 0.16);
+  --user: rgba(21, 69, 63, 0.88);
+  --bot: rgba(42, 37, 27, 0.9);
+  --accent: #d7cfb8;
+  --accent-dark: #9d9070;
+  --warm: #c19455;
+  --shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  --soft-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
 }
 
 * {
@@ -21,12 +21,31 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    linear-gradient(135deg, rgba(46, 111, 115, 0.1), transparent 34%),
-    linear-gradient(315deg, rgba(216, 123, 74, 0.11), transparent 30%),
-    var(--bg);
+  background: var(--bg);
   color: var(--ink);
-  font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
+  font-family: "Cascadia Mono", "Consolas", "Microsoft YaHei", monospace;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+body::before {
+  z-index: -2;
+  background: url("/static/assets/cmd-bg.jpg") center / cover no-repeat;
+}
+
+body::after {
+  z-index: -1;
+  background:
+    linear-gradient(rgba(0, 0, 0, 0.68), rgba(0, 0, 0, 0.74)),
+    radial-gradient(circle at 18% 18%, rgba(215, 207, 184, 0.12), transparent 28%),
+    rgba(0, 0, 0, 0.38);
+  backdrop-filter: saturate(0.82) brightness(0.75);
 }
 
 .app-shell {
@@ -46,6 +65,7 @@ body {
   background: var(--panel);
   box-shadow: var(--shadow);
   border-radius: 8px;
+  backdrop-filter: blur(8px);
 }
 
 .side-panel {
@@ -68,6 +88,7 @@ body {
 .panel-title {
   font-size: 15px;
   font-weight: 850;
+  color: var(--ink);
 }
 
 .status,
@@ -87,17 +108,17 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #43a36b;
-  box-shadow: 0 0 0 0 rgba(67, 163, 107, 0.42);
+  background: #c7ff9e;
+  box-shadow: 0 0 0 0 rgba(199, 255, 158, 0.42);
   animation: pulse 1.8s ease-out infinite;
 }
 
 .icon-btn,
 .rail,
 button {
-  border: 0;
-  background: var(--accent);
-  color: white;
+  border: 1px solid rgba(237, 233, 220, 0.18);
+  background: rgba(215, 207, 184, 0.13);
+  color: var(--ink);
   font-weight: 750;
   cursor: pointer;
   transition: transform 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
@@ -105,6 +126,7 @@ button {
 
 button:hover {
   transform: translateY(-1px);
+  background: rgba(215, 207, 184, 0.22);
   box-shadow: var(--soft-shadow);
 }
 
@@ -181,22 +203,22 @@ button:hover {
 .persona-summary {
   margin: 12px 0 2px;
   padding: 10px;
-  border: 1px solid rgba(46, 111, 115, 0.18);
-  background: rgba(46, 111, 115, 0.06);
+  border: 1px solid rgba(215, 207, 184, 0.18);
+  background: rgba(0, 0, 0, 0.18);
   border-radius: 8px;
 }
 
 .fact-card {
   margin-top: 6px;
   padding: 10px;
-  border: 1px solid rgba(216, 123, 74, 0.22);
-  background: rgba(216, 123, 74, 0.08);
+  border: 1px solid rgba(193, 148, 85, 0.28);
+  background: rgba(193, 148, 85, 0.1);
   border-radius: 8px;
 }
 
 .persona-summary p {
   margin: 0 0 6px;
-  color: #394247;
+  color: var(--ink);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -228,7 +250,7 @@ button:hover {
 .tag {
   border: 1px solid var(--line);
   background: var(--panel-2);
-  color: #394247;
+  color: var(--ink);
   padding: 3px 7px;
   font-size: 12px;
   border-radius: 999px;
@@ -243,7 +265,7 @@ button:hover {
 .chat-header {
   border-bottom: 1px solid var(--line);
   padding: 13px 16px;
-  background: rgba(251, 250, 246, 0.94);
+  background: rgba(8, 10, 9, 0.72);
   backdrop-filter: blur(10px);
 }
 
@@ -260,7 +282,8 @@ button:hover {
   height: 38px;
   border-radius: 50%;
   object-fit: cover;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(237, 233, 220, 0.24);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.28);
 }
 
 .avatar-fallback {
@@ -291,12 +314,13 @@ h1 {
 .composer button {
   padding: 10px 14px;
   border-radius: 8px;
+  white-space: nowrap;
 }
 
 .messages {
   overflow: auto;
   padding: 18px;
-  scrollbar-color: rgba(46, 111, 115, 0.45) transparent;
+  scrollbar-color: rgba(215, 207, 184, 0.45) transparent;
 }
 
 .msg-row {
@@ -338,16 +362,35 @@ h1 {
   word-break: break-word;
   border-radius: 8px;
   box-shadow: var(--soft-shadow);
+  border: 1px solid rgba(237, 233, 220, 0.1);
 }
 
 .msg-row.bot .bubble {
   background: var(--bot);
   border-top-left-radius: 2px;
+  color: #f1ead9;
 }
 
 .msg-row.user .bubble {
   background: var(--user);
   border-top-right-radius: 2px;
+  color: #effffb;
+}
+
+.image-bubble {
+  padding: 4px;
+  width: fit-content;
+  max-width: min(240px, 48vw);
+  overflow: hidden;
+}
+
+.message-image {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 6px;
 }
 
 .composer {
@@ -356,7 +399,7 @@ h1 {
   gap: 10px;
   border-top: 1px solid var(--line);
   padding: 12px;
-  background: rgba(251, 250, 246, 0.96);
+  background: rgba(8, 10, 9, 0.76);
   backdrop-filter: blur(10px);
 }
 
@@ -371,7 +414,7 @@ select {
   width: fit-content;
   max-width: 180px;
   border: 1px solid var(--line);
-  background: white;
+  background: rgba(0, 0, 0, 0.42);
   color: var(--ink);
   padding: 6px 30px 6px 9px;
   border-radius: 8px;
@@ -381,8 +424,8 @@ select {
 }
 
 select:focus {
-  border-color: rgba(46, 111, 115, 0.75);
-  box-shadow: 0 0 0 3px rgba(46, 111, 115, 0.12);
+  border-color: rgba(215, 207, 184, 0.65);
+  box-shadow: 0 0 0 3px rgba(215, 207, 184, 0.12);
 }
 
 textarea {
@@ -390,7 +433,8 @@ textarea {
   border: 1px solid var(--line);
   padding: 10px;
   font: inherit;
-  background: white;
+  background: rgba(0, 0, 0, 0.46);
+  color: var(--ink);
   outline: none;
   min-height: 44px;
   max-height: 150px;
@@ -399,8 +443,12 @@ textarea {
 }
 
 textarea:focus {
-  border-color: rgba(46, 111, 115, 0.75);
-  box-shadow: 0 0 0 3px rgba(46, 111, 115, 0.12);
+  border-color: rgba(215, 207, 184, 0.65);
+  box-shadow: 0 0 0 3px rgba(215, 207, 184, 0.12);
+}
+
+textarea::placeholder {
+  color: rgba(237, 233, 220, 0.46);
 }
 
 .memory {
@@ -418,8 +466,8 @@ textarea:focus {
 }
 
 .memory summary b {
-  color: var(--accent-dark);
-  background: rgba(46, 111, 115, 0.1);
+  color: var(--ink);
+  background: rgba(215, 207, 184, 0.14);
   padding: 1px 6px;
   border-radius: 999px;
 }
