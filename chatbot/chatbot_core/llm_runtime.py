@@ -9,13 +9,16 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from .config import AppConfig
-from .facts_runtime import days_since, duration_phrase, top_english_name, top_identity_name
+from .facts_runtime import days_since, top_english_name, top_identity_name
 from .retrieval import Retriever
 from .slang import reply_cues
 from .textfix import fix_text
 
 
-RUNTIME_VERSION = "backup-user-style-v9-nuwa-facts-emotion"
+RUNTIME_VERSION = "backup-user-style-v10-style-compact"
+
+DEFAULT_MAX_REPLY_CHARS = 54
+FACT_MAX_REPLY_CHARS = 28
 
 
 NUWA_PROTOCOL = [
@@ -64,6 +67,34 @@ def is_usable_style_line(text: str) -> bool:
     return True
 
 
+def compact_reply(text: str, max_chars: int = DEFAULT_MAX_REPLY_CHARS) -> str:
+    text = fix_text(text).strip().strip("“”\"")
+    if not text:
+        return ""
+    text = re.sub(r"^(根据|从|按)(聊天记录|记录|事实卡|检索结果)[，,:：]?", "", text)
+    text = re.sub(r"(我查到|可以看到|证据显示)[，,:：]?", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+
+    parts = [part.strip() for part in re.split(r"[\n。；;，,]+", text) if part.strip()]
+    picked: list[str] = []
+    total = 0
+    for part in parts:
+        if len(part) > max_chars:
+            part = part[:max_chars]
+        next_total = total + len(part)
+        if picked and next_total > max_chars:
+            break
+        picked.append(part)
+        total = next_total
+        if len(picked) >= 2:
+            break
+    if picked:
+        return "\n".join(picked)
+    return text[:max_chars]
+
+
 class ChatEngine:
     def __init__(
         self,
@@ -100,7 +131,7 @@ class ChatEngine:
         fact_reply = self.fact_first_reply(message, history, memories)
         if fact_reply:
             return {
-                "reply": fact_reply,
+                "reply": compact_reply(fact_reply, FACT_MAX_REPLY_CHARS),
                 "mode": f"{self.mode}_fact_route",
                 "emotion": emotion,
                 "facts": self.public_facts(),
@@ -109,7 +140,7 @@ class ChatEngine:
 
         if self.is_memory_dispute_question(message) and self.has_memory_evidence(message, history, memories):
             return {
-                "reply": self.memory_evidence_reply(message, history, memories),
+                "reply": compact_reply(self.memory_evidence_reply(message, history, memories), FACT_MAX_REPLY_CHARS),
                 "mode": f"{self.mode}_evidence_route",
                 "emotion": emotion,
                 "facts": self.public_facts(),
@@ -118,7 +149,7 @@ class ChatEngine:
 
         if self.should_route_locally(message):
             return {
-                "reply": self.local_reply(message, memories, conversation_memory, emotion),
+                "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
                 "mode": f"{self.mode}_local_route",
                 "emotion": emotion,
                 "facts": self.public_facts(),
@@ -138,7 +169,7 @@ class ChatEngine:
                 }
             except Exception as exc:
                 return {
-                    "reply": self.local_reply(message, memories, conversation_memory, emotion),
+                    "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
                     "mode": "local_fallback_after_sophnet_error",
                     "api_error": str(exc),
                     "emotion": emotion,
@@ -157,7 +188,7 @@ class ChatEngine:
                 }
             except Exception as exc:
                 return {
-                    "reply": self.local_reply(message, memories, conversation_memory, emotion),
+                    "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
                     "mode": "local_fallback_after_api_error",
                     "api_error": str(exc),
                     "emotion": emotion,
@@ -165,7 +196,7 @@ class ChatEngine:
                     "memories": memories,
                 }
         return {
-            "reply": self.local_reply(message, memories, conversation_memory, emotion),
+            "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
             "mode": self.mode,
             "emotion": emotion,
             "facts": self.public_facts(),
@@ -213,9 +244,15 @@ class ChatEngine:
             "recent_assistant_replies": recent_assistant_replies,
             "conversation_memory": conversation_memory,
             "retrieved_memories": memories,
+            "style_samples_from_backup": self.extract_style_lines(memories)[:12],
             "slang_and_homophone_cues": reply_cues(message),
             "user_message": message,
             "output_rules": [
+                "默认像微信短消息：1-2个短句，单句尽量不超过18个中文字符。",
+                "除非用户明确要求详细，不要解释来龙去脉，不要写完整报告句。",
+                "事实只点到即可，比如“林薇艺，lily”或“2024-10-13开始的”。",
+                "优先保留个人语气：吐槽、反问、停顿、轻微敷衍可以有，别太端着。",
+                "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
                 "身份/名字/时间/是否说过的问题必须优先使用 identity_and_timeline_facts 和 retrieved_memories。",
@@ -239,7 +276,7 @@ class ChatEngine:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "max_output_tokens": 260,
+            "max_output_tokens": 120,
         }
         request = urllib.request.Request(
             f"{self.config.openai_base_url.rstrip('/')}/responses",
@@ -261,7 +298,7 @@ class ChatEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You simulate backup's concise Chinese chat style. Evidence and local facts outrank improvisation. Avoid fixed catchphrases.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in 1-2 short chat bubbles. Evidence outranks improvisation, but never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -368,10 +405,11 @@ class ChatEngine:
         if self.is_repeated_reply(cleaned, history or []):
             return self.repair_repeated_reply(message, emotion)
         if self.is_memory_dispute_question(message) and self.looks_like_denial(cleaned) and self.has_memory_evidence(message, history or [], memories):
-            return self.memory_evidence_reply(message, history or [], memories)
+            return compact_reply(self.memory_evidence_reply(message, history or [], memories), FACT_MAX_REPLY_CHARS)
         if self.is_bot_identity_question(message) and self.looks_like_denial(cleaned):
-            return self.fact_first_reply(message, history or [], memories) or cleaned
-        return cleaned
+            return compact_reply(self.fact_first_reply(message, history or [], memories) or cleaned, FACT_MAX_REPLY_CHARS)
+        max_chars = 90 if self.allows_long_reply(message) else DEFAULT_MAX_REPLY_CHARS
+        return compact_reply(cleaned, max_chars)
 
     def fact_first_reply(self, message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str | None:
         stripped = message.strip()
@@ -381,14 +419,14 @@ class ChatEngine:
             if name and english:
                 return pick(
                     [
-                        f"{name}吧，英文名好像是 {english}",
-                        f"林...不是，记录里最稳的是{name}，{english}也提过",
-                        f"{name}，然后 {english} 这个英文名你也提过",
+                        f"{name}，{english}",
+                        f"{name}吧\n{english}也有",
+                        f"你不是猜到{name}了吗",
                     ],
                     stripped,
                 )
             if name:
-                return pick([f"{name}吧", f"记录里我叫{name}", f"你不是猜到{name}了吗"], stripped)
+                return pick([f"{name}吧", f"就{name}", f"你不是猜到{name}了吗"], stripped)
         if self.is_time_question(stripped):
             return self.time_reply(stripped)
         if self.is_memory_dispute_question(stripped) and self.has_memory_evidence(stripped, history, memories):
@@ -398,13 +436,12 @@ class ChatEngine:
     def time_reply(self, message: str) -> str:
         start = self.facts.get("relationship", {}).get("known_since") or self.facts.get("date_range", {}).get("start")
         days = days_since(start, datetime.now())
-        phrase = duration_phrase(days)
         date = (start or "2024-10-13")[:10]
         return pick(
             [
-                f"从{date}算的话，{phrase}了",
-                f"记录里最早是{date}，到现在差不多{phrase}",
-                f"{date}开始的吧，已经{phrase}了",
+                f"{date}开始的吧",
+                f"{date}\n挺久了",
+                f"从{date}算",
             ],
             message,
         )
@@ -549,6 +586,10 @@ class ChatEngine:
         )
 
     @staticmethod
+    def allows_long_reply(message: str) -> bool:
+        return any(token in message for token in ["详细", "讲清楚", "展开", "分析", "解释一下", "说清楚"])
+
+    @staticmethod
     def build_retrieval_query(message: str, history: list[dict[str, Any]]) -> str:
         recent_user_text = [
             str(item.get("content", ""))
@@ -606,15 +647,15 @@ class ChatEngine:
     @staticmethod
     def meaning_reply(message: str) -> str:
         if "乐乐" in message:
-            return pick(["乐子那个乐吧，不是单纯名字", "就是找乐子/看乐子的那个梗", "偏网络梗，差不多是好笑、找乐子的意思"], message)
+            return pick(["乐子那个乐", "找乐子的乐吧", "不是单纯名字"], message)
         return pick(["字面意思吧", "你说哪个词", "这个要看你前面怎么用的"], message)
 
     @staticmethod
     def slang_meaning_reply(message: str) -> str:
         if "乐乐" in message:
-            return pick(["乐子那个乐吧，不是单纯名字", "就是找乐子/看乐子的那个梗", "偏网络梗，差不多是好笑、找乐子的意思"], message)
+            return pick(["乐子那个乐", "找乐子的乐吧", "不是单纯名字"], message)
         if "乐子" in message:
-            return pick(["看热闹找乐子的意思", "就是拿来好笑/看戏的那个乐子", "乐子人那个乐子"], message)
+            return pick(["看乐子的意思", "拿来好笑的", "乐子人那个乐子"], message)
         return pick(["是梗，得看上下文", "按网络梗理解，不是字面硬翻", "这个要结合前后文看"], message)
 
     @staticmethod
