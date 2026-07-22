@@ -15,7 +15,7 @@ from .slang import reply_cues
 from .textfix import fix_text
 
 
-RUNTIME_VERSION = "backup-user-style-v13-fact-strategy"
+RUNTIME_VERSION = "backup-user-style-v14-broader-facts"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -461,8 +461,18 @@ class ChatEngine:
             return self.birthday_reply(stripped)
         if self.is_relationship_question(stripped):
             return self.relationship_reply(stripped)
+        if self.is_soothing_question(stripped):
+            return self.soothing_reply(stripped)
+        if self.is_topic_question(stripped):
+            return self.shared_topic_reply(stripped)
         if self.is_emotion_history_question(stripped):
             return self.emotion_history_reply(stripped)
+        if self.is_preference_question(stripped):
+            return self.category_fact_reply(stripped, "preferences")
+        if self.is_nickname_question(stripped):
+            return self.category_fact_reply(stripped, "nicknames")
+        if self.is_habit_question(stripped):
+            return self.category_fact_reply(stripped, "habits")
         if self.is_wake_time_question(stripped):
             return self.wake_time_reply(memories)
         if self.is_time_question(stripped):
@@ -514,6 +524,65 @@ class ChatEngine:
         if values:
             return "有波动\n记录里能看"
         return None
+
+    def category_fact_reply(self, message: str, section: str) -> str | None:
+        person = "backup"
+        if section == "nicknames":
+            if any(token in message for token in ["叫我", "喊我", "称呼我"]):
+                person = "NonForgetter"
+            elif any(token in message for token in ["叫你", "喊你", "称呼你"]):
+                person = "backup"
+        else:
+            if any(token in message for token in ["我", "我的", "我平时", "我喜欢", "我讨厌"]):
+                person = "NonForgetter"
+            if any(token in message for token in ["你", "你的", "你平时", "你喜欢", "你讨厌"]):
+                person = "backup"
+        rows = (self.facts.get(section, {}).get(person) or [])[:4]
+        if not rows:
+            return "记录里没稳"
+        labels = [self.display_fact_label(row.get("value", "")) for row in rows[:2]]
+        if len(labels) == 1:
+            return f"像是{labels[0]}"
+        return f"{labels[0]}\n还有{labels[1]}"
+
+    def shared_topic_reply(self, message: str) -> str | None:
+        rows = (self.facts.get("shared_topics") or [])[:4]
+        if not rows:
+            return "记录里没稳"
+        labels = [self.display_fact_label(row.get("value", "")) for row in rows[:3]]
+        return "\n".join(labels[:3])
+
+    def soothing_reply(self, message: str) -> str | None:
+        rows = (self.facts.get("soothing_patterns") or [])[:3]
+        if not rows:
+            return "记录里没稳"
+        labels = [self.display_fact_label(row.get("value", "")) for row in rows[:2]]
+        return "\n".join(labels)
+
+    @staticmethod
+    def display_fact_label(value: str) -> str:
+        labels = {
+            "like": "有喜欢的会直说",
+            "dislike": "不喜欢也会说",
+            "food": "吃的",
+            "media_game": "游戏二游",
+            "money_gift": "钱和礼物",
+            "sleep_wake": "睡觉起床",
+            "study_work": "学习考试",
+            "meal": "吃饭",
+            "family": "家里人",
+            "health": "身体状态",
+            "games": "游戏",
+            "sleep": "睡觉",
+            "study_exam": "学习考试",
+            "anime_music": "动画和歌",
+            "family_daily": "家里日常",
+            "sleep_rest": "让你睡觉",
+            "comfort": "抱抱安慰",
+            "deescalate": "先哄住",
+            "feed_care": "催吃饭",
+        }
+        return labels.get(value, value)
 
     def time_reply(self, message: str) -> str:
         start = self.facts.get("relationship", {}).get("known_since") or self.facts.get("date_range", {}).get("start")
@@ -655,6 +724,25 @@ class ChatEngine:
             ]
             for key, values in (self.facts.get("emotion_patterns") or {}).items()
         }
+        preferences = self.slim_section("preferences")
+        habits = self.slim_section("habits")
+        nicknames = self.slim_section("nicknames")
+        topics = [
+            {
+                "value": item.get("value"),
+                "score": item.get("score"),
+                "evidence": (item.get("evidence") or [])[:2],
+            }
+            for item in (self.facts.get("shared_topics") or [])[:8]
+        ]
+        soothing = [
+            {
+                "value": item.get("value"),
+                "score": item.get("score"),
+                "evidence": (item.get("evidence") or [])[:2],
+            }
+            for item in (self.facts.get("soothing_patterns") or [])[:6]
+        ]
         return {
             "persona_display": self.facts.get("persona_display", "backup"),
             "current_user": self.facts.get("current_user", "NonForgetter"),
@@ -667,6 +755,24 @@ class ChatEngine:
             "birthdays": birthdays,
             "relationship_brief": relationship,
             "emotion_brief": emotions,
+            "preference_brief": preferences,
+            "habit_brief": habits,
+            "nickname_brief": nicknames,
+            "shared_topics": topics,
+            "soothing_patterns": soothing,
+        }
+
+    def slim_section(self, section: str) -> dict[str, list[dict[str, Any]]]:
+        return {
+            key: [
+                {
+                    "value": item.get("value"),
+                    "score": item.get("score"),
+                    "evidence": (item.get("evidence") or [])[:2],
+                }
+                for item in values[:6]
+            ]
+            for key, values in (self.facts.get(section) or {}).items()
         }
 
     @staticmethod
@@ -795,6 +901,11 @@ class ChatEngine:
             or ChatEngine.is_time_question(message)
             or ChatEngine.is_wake_time_question(message)
             or ChatEngine.is_birthday_question(message)
+            or ChatEngine.is_preference_question(message)
+            or ChatEngine.is_habit_question(message)
+            or ChatEngine.is_nickname_question(message)
+            or ChatEngine.is_topic_question(message)
+            or ChatEngine.is_soothing_question(message)
         )
 
     @staticmethod
@@ -825,6 +936,16 @@ class ChatEngine:
             )
         if domain == "emotion":
             expansions.extend(["情绪 心情 难受 伤心 生气 哭 emo 破防 委屈 崩溃 困 累 起伏"])
+        if domain == "preference":
+            expansions.extend(["喜欢 不喜欢 讨厌 想吃 爱吃 好看 好听 想玩 想要 偏好"])
+        if domain == "habit":
+            expansions.extend(["习惯 平时 睡觉 起床 熬夜 吃饭 上课 考试 家里 身体 不舒服"])
+        if domain == "nickname":
+            expansions.extend(["叫你 叫我 喊你 喊我 名字 昵称 外号 宝宝 姐 哥 猫"])
+        if domain == "topic":
+            expansions.extend(["平时聊 常聊 话题 游戏 原神 星铁 吃饭 睡觉 学校 动画 音乐 家里"])
+        if domain == "soothing":
+            expansions.extend(["怎么哄 安慰 抱抱 别难受 别生气 早点休息 多睡 吃饭 乖"])
         if ChatEngine.is_wake_time_question(message):
             expansions.extend(
                 [
@@ -842,10 +963,20 @@ class ChatEngine:
             return "birthday"
         if ChatEngine.is_relationship_question(message):
             return "relationship"
+        if ChatEngine.is_soothing_question(message):
+            return "soothing"
+        if ChatEngine.is_topic_question(message):
+            return "topic"
         if ChatEngine.is_emotion_history_question(message):
             return "emotion"
         if ChatEngine.is_wake_time_question(message):
             return "habit"
+        if ChatEngine.is_preference_question(message):
+            return "preference"
+        if ChatEngine.is_habit_question(message):
+            return "habit"
+        if ChatEngine.is_nickname_question(message):
+            return "nickname"
         if ChatEngine.is_time_question(message):
             return "time"
         if ChatEngine.is_memory_dispute_question(message):
@@ -895,7 +1026,11 @@ class ChatEngine:
             "birthday": ["生日", "生快", "生日快乐", "几号", "哪天", "出生", "过生日"],
             "relationship": ["喜欢", "爱", "想你", "抱抱", "陪你", "吵架", "生气", "冷暴力", "对不起", "和好", "原谅", "别生气", "不理"],
             "emotion": ["难受", "伤心", "生气", "哭", "emo", "破防", "委屈", "崩溃", "困", "累", "没睡醒", "烦"],
-            "habit": ["起床", "睡醒", "醒了", "还没起", "起不来", "没睡醒", "几点醒", "几点起"],
+            "preference": ["喜欢", "不喜欢", "讨厌", "想吃", "爱吃", "好看", "好听", "想玩", "想要"],
+            "habit": ["习惯", "平时", "睡", "起床", "睡醒", "醒了", "还没起", "起不来", "没睡醒", "熬夜", "吃饭", "上课", "考试", "家里", "不舒服"],
+            "nickname": ["叫你", "叫我", "喊你", "喊我", "昵称", "名字", "宝宝", "姐", "哥", "猫"],
+            "topic": ["原神", "星铁", "游戏", "吃饭", "睡觉", "学校", "动画", "歌", "家里"],
+            "soothing": ["抱抱", "安慰", "别难受", "别生气", "早点休息", "多睡", "吃饭", "乖"],
             "memory_dispute": ["说过", "记得", "记错", "没说过", "绝对没有"],
         }.get(domain, [])
 
@@ -975,6 +1110,26 @@ class ChatEngine:
                 "崩溃",
             ]
         )
+
+    @staticmethod
+    def is_preference_question(message: str) -> bool:
+        return any(token in message for token in ["喜欢什么", "讨厌什么", "不喜欢什么", "爱吃什么", "想吃什么", "偏好", "喜欢吃", "喜欢玩"])
+
+    @staticmethod
+    def is_habit_question(message: str) -> bool:
+        return any(token in message for token in ["平时", "习惯", "作息", "几点睡", "吃饭", "上课", "考试", "家里", "身体", "不舒服"])
+
+    @staticmethod
+    def is_nickname_question(message: str) -> bool:
+        return any(token in message for token in ["叫我什么", "叫你什么", "喊我什么", "喊你什么", "昵称", "外号", "怎么称呼"])
+
+    @staticmethod
+    def is_topic_question(message: str) -> bool:
+        return any(token in message for token in ["聊什么", "常聊", "平时聊", "话题", "聊得最多"])
+
+    @staticmethod
+    def is_soothing_question(message: str) -> bool:
+        return any(token in message for token in ["怎么哄", "怎么安慰", "哄我", "安慰我", "我难受怎么办", "我生气怎么办"])
 
     @staticmethod
     def is_wake_time_question(message: str) -> bool:

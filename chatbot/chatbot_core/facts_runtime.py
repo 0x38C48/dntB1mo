@@ -11,7 +11,7 @@ from .dataset import Dataset
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-FACTS_VERSION = "0.2"
+FACTS_VERSION = "0.3"
 STYLE_ROLE = "user"
 OTHER_ROLE = "target"
 ROLE_LABELS = {STYLE_ROLE: "backup", OTHER_ROLE: "NonForgetter"}
@@ -46,6 +46,27 @@ RELATIONSHIP_LEXICON = {
     "boundary": ["不要", "别这样", "不可以", "不准", "算了", "别问", "不想说", "不需要和我说"],
     "jealousy": ["吃醋", "嫉妒", "占有欲", "前任", "男朋友", "女朋友", "男票", "对象"],
 }
+
+PREFERENCE_LEXICON = {
+    "like": ["喜欢", "想吃", "爱吃", "好看", "好听", "想玩", "想要", "喜欢看", "喜欢听"],
+    "dislike": ["不喜欢", "讨厌", "难吃", "不好看", "不好听", "不想", "别给我", "受不了"],
+    "food": ["吃饭", "想吃", "饿", "奶茶", "咖啡", "蛋糕", "火锅", "米其林", "冰淇淋", "饭"],
+    "media_game": ["原神", "星铁", "崩铁", "二游", "游戏", "动画", "番", "歌", "直播", "天梯", "恋爱循环"],
+    "money_gift": ["红包", "转账", "钱", "礼物", "买", "v我", "五十块", "发钱"],
+}
+
+HABIT_LEXICON = {
+    "sleep_wake": ["睡", "熬夜", "晚安", "困", "睡醒", "起床", "起不来", "没睡醒", "回笼"],
+    "study_work": ["上课", "考试", "作业", "学校", "班长", "体测", "练", "论文", "专业"],
+    "meal": ["吃饭", "早饭", "午饭", "晚饭", "饿", "外卖", "吃完"],
+    "family": ["我爸", "我妈", "爸妈", "家里", "回家", "我弟", "我姐"],
+    "health": ["肚子疼", "头疼", "发烧", "感冒", "不舒服", "好虚", "累", "病"],
+}
+
+NICKNAME_PATTERNS = [
+    r"(?:叫你|喊你|称呼你|你叫)([\u4e00-\u9fffA-Za-z0-9_～~·]{1,12})",
+    r"(?:叫我|喊我|称呼我|我叫)([\u4e00-\u9fffA-Za-z0-9_～~·]{1,12})",
+]
 
 RELATIVE_DAY_WORDS = {"今天": 0, "明天": 1, "昨天": -1}
 
@@ -84,6 +105,16 @@ def build_facts(dataset: Dataset) -> dict[str, Any]:
     emotion_evidence: dict[str, dict[str, list[dict[str, str]]]] = {STYLE_ROLE: {}, OTHER_ROLE: {}}
     relationship_counter: Counter[str] = Counter()
     relationship_evidence: dict[str, list[dict[str, str]]] = {}
+    preference_counter: dict[str, Counter[str]] = {STYLE_ROLE: Counter(), OTHER_ROLE: Counter()}
+    preference_evidence: dict[str, dict[str, list[dict[str, str]]]] = {STYLE_ROLE: {}, OTHER_ROLE: {}}
+    habit_counter: dict[str, Counter[str]] = {STYLE_ROLE: Counter(), OTHER_ROLE: Counter()}
+    habit_evidence: dict[str, dict[str, list[dict[str, str]]]] = {STYLE_ROLE: {}, OTHER_ROLE: {}}
+    nickname_counter: dict[str, Counter[str]] = {STYLE_ROLE: Counter(), OTHER_ROLE: Counter()}
+    nickname_evidence: dict[str, dict[str, list[dict[str, str]]]] = {STYLE_ROLE: {}, OTHER_ROLE: {}}
+    topic_counter: Counter[str] = Counter()
+    topic_evidence: dict[str, list[dict[str, str]]] = {}
+    soothing_counter: Counter[str] = Counter()
+    soothing_evidence: dict[str, list[dict[str, str]]] = {}
     timeline: list[dict[str, str]] = []
     window: deque[dict[str, Any]] = deque(maxlen=24)
 
@@ -96,6 +127,11 @@ def build_facts(dataset: Dataset) -> dict[str, Any]:
         collect_birthdays(text, role, ts, birthday_counter, birthday_evidence)
         collect_emotions(text, role, ts, emotion_counter, emotion_evidence)
         collect_relationship(text, role, ts, relationship_counter, relationship_evidence, timeline)
+        collect_preferences(text, role, ts, preference_counter, preference_evidence)
+        collect_habits(text, role, ts, habit_counter, habit_evidence)
+        collect_nicknames(text, role, ts, nickname_counter, nickname_evidence)
+        collect_topics(text, role, ts, topic_counter, topic_evidence)
+        collect_soothing(text, role, ts, soothing_counter, soothing_evidence)
         window.append(msg)
 
     return {
@@ -127,15 +163,29 @@ def build_facts(dataset: Dataset) -> dict[str, Any]:
             ROLE_LABELS[role]: ranked_candidates(counter, emotion_evidence[role], minimum=2, limit=8)
             for role, counter in emotion_counter.items()
         },
+        "preferences": {
+            ROLE_LABELS[role]: ranked_candidates(counter, preference_evidence[role], minimum=2, limit=10)
+            for role, counter in preference_counter.items()
+        },
+        "habits": {
+            ROLE_LABELS[role]: ranked_candidates(counter, habit_evidence[role], minimum=2, limit=10)
+            for role, counter in habit_counter.items()
+        },
+        "nicknames": {
+            ROLE_LABELS[role]: ranked_candidates(counter, nickname_evidence[role], minimum=1, limit=10)
+            for role, counter in nickname_counter.items()
+        },
+        "shared_topics": ranked_candidates(topic_counter, topic_evidence, minimum=3, limit=12),
+        "soothing_patterns": ranked_candidates(soothing_counter, soothing_evidence, minimum=2, limit=8),
         "retrieval_policy": {
-            "classify_first": "先把问题分到 identity/birthday/relationship/emotion/habit/time/memory_dispute/slang/open_chat。",
-            "persistent_facts": "身份、生日候选、关系模式、情绪模式先查 facts.json。",
+            "classify_first": "先把问题分到 identity/birthday/relationship/emotion/preference/habit/nickname/topic/time/memory_dispute/slang/open_chat。",
+            "persistent_facts": "身份、生日候选、关系模式、情绪模式、偏好、习惯、昵称、常聊主题先查 facts.json。",
             "temporary_facts": "具体追问再用 domain query 扩展检索前 10 条，把命中的短证据当临时事实。",
             "api_budget": "证据足够的短事实本地回答；证据不足或需要语气整合时才调用 API。",
             "anti_hallucination": "没有证据时说“记录里没看到/像是”，不要编确定日期、关系或情绪。",
         },
         "runtime_rules": [
-            "身份、生日、时间、关系经历、情绪起伏问题先看事实卡和临时检索证据。",
+            "身份、生日、时间、关系经历、情绪起伏、偏好习惯、昵称话题问题先看事实卡和临时检索证据。",
             "事实有证据时不要说不知道；事实不确定时用熟人语气承认只记得线索。",
             "不要把当前聊天对象搞反：当前用户是 NonForgetter，模拟对象是 backup。",
             "API 只负责语气整合，不负责凭空补事实。",
@@ -247,6 +297,132 @@ def collect_relationship(
                     "text": text[:120],
                 }
             )
+
+
+def collect_preferences(
+    text: str,
+    role: str,
+    ts: str,
+    preference_counter: dict[str, Counter[str]],
+    preference_evidence: dict[str, dict[str, list[dict[str, str]]]],
+) -> None:
+    for category, tokens in PREFERENCE_LEXICON.items():
+        hits = [token for token in tokens if token in text]
+        if not hits:
+            continue
+        preference_counter[role][category] += len(hits)
+        add_evidence(preference_evidence[role], category, ts, role, text)
+
+
+def collect_habits(
+    text: str,
+    role: str,
+    ts: str,
+    habit_counter: dict[str, Counter[str]],
+    habit_evidence: dict[str, dict[str, list[dict[str, str]]]],
+) -> None:
+    for category, tokens in HABIT_LEXICON.items():
+        hits = [token for token in tokens if token in text]
+        if not hits:
+            continue
+        habit_counter[role][category] += len(hits)
+        add_evidence(habit_evidence[role], category, ts, role, text)
+
+
+def collect_nicknames(
+    text: str,
+    role: str,
+    ts: str,
+    nickname_counter: dict[str, Counter[str]],
+    nickname_evidence: dict[str, dict[str, list[dict[str, str]]]],
+) -> None:
+    for pattern in NICKNAME_PATTERNS:
+        for candidate in re.findall(pattern, text):
+            nickname = cleanup_nickname(candidate)
+            if not nickname:
+                continue
+            nickname_counter[role][nickname] += 1
+            add_evidence(nickname_evidence[role], nickname, ts, role, text)
+    for suffix in ["姐", "哥", "猫", "宝", "宝宝", "虚哥", "圣女", "陪玩姐"]:
+        if suffix in text and len(text) <= 18:
+            nickname_counter[role][suffix] += 1
+            add_evidence(nickname_evidence[role], suffix, ts, role, text)
+
+
+def collect_topics(
+    text: str,
+    role: str,
+    ts: str,
+    topic_counter: Counter[str],
+    topic_evidence: dict[str, list[dict[str, str]]],
+) -> None:
+    topics = {
+        "games": ["原神", "星铁", "崩铁", "二游", "天梯", "任务", "版本", "游戏"],
+        "food": ["吃饭", "想吃", "饿", "饭", "奶茶", "咖啡", "米其林"],
+        "sleep": ["睡", "困", "晚安", "起床", "睡醒", "熬夜"],
+        "study_exam": ["上课", "考试", "作业", "学校", "体测", "练3000"],
+        "anime_music": ["动画", "番", "歌", "直播", "恋爱循环", "白色相簿"],
+        "family_daily": ["我爸", "我妈", "我弟", "家里", "回家"],
+        "money_gift": ["红包", "钱", "转账", "礼物", "买"],
+    }
+    for topic, tokens in topics.items():
+        hits = [token for token in tokens if token in text]
+        if not hits:
+            continue
+        topic_counter[topic] += len(hits)
+        add_evidence(topic_evidence, topic, ts, role, text)
+
+
+def collect_soothing(
+    text: str,
+    role: str,
+    ts: str,
+    soothing_counter: Counter[str],
+    soothing_evidence: dict[str, list[dict[str, str]]],
+) -> None:
+    if role != OTHER_ROLE:
+        return
+    patterns = {
+        "sleep_rest": ["早点休息", "多睡", "晚安", "困就", "别熬"],
+        "comfort": ["抱抱", "摸摸", "别难受", "别哭", "心疼", "乖"],
+        "deescalate": ["别生气", "不气", "没事", "好嘛", "行行行"],
+        "feed_care": ["吃饭", "去吃", "别饿", "喝水"],
+    }
+    for name, tokens in patterns.items():
+        hits = [token for token in tokens if token in text]
+        if not hits:
+            continue
+        soothing_counter[name] += len(hits)
+        add_evidence(soothing_evidence, name, ts, role, text)
+
+
+def cleanup_nickname(value: str) -> str | None:
+    value = re.sub(r"[，。！？?!.、\s].*$", "", value.strip())
+    blocked = {
+        "什么",
+        "这个",
+        "那个",
+        "名字",
+        "一下",
+        "一声",
+        "什么呀",
+        "什么啊",
+        "了",
+        "吗",
+        "啊",
+        "吧",
+        "呢",
+        "啦",
+        "看过",
+        "打洲",
+    }
+    if not value or value in blocked:
+        return None
+    if len(value) > 8:
+        return None
+    if len(value) == 1 and value not in {"猫", "哥", "姐", "宝"}:
+        return None
+    return value
 
 
 def ranked_candidates(
@@ -434,6 +610,10 @@ def render_facts_md(facts: dict[str, Any]) -> str:
         birthday_rows.append(f"- {person} birthday candidate: {top}")
     relationship = facts.get("relationship_history", {}).get("categories") or []
     emotions = facts.get("emotion_patterns", {}).get("backup") or []
+    preferences = facts.get("preferences", {}).get("backup") or []
+    habits = facts.get("habits", {}).get("backup") or []
+    topics = facts.get("shared_topics") or []
+    soothing = facts.get("soothing_patterns") or []
     return "\n".join(
         [
             "# Runtime Facts",
@@ -447,5 +627,9 @@ def render_facts_md(facts: dict[str, Any]) -> str:
             *birthday_rows,
             f"- relationship categories: {', '.join(item['value'] for item in relationship[:5]) or '-'}",
             f"- backup emotion patterns: {', '.join(item['value'] for item in emotions[:5]) or '-'}",
+            f"- backup preferences: {', '.join(item['value'] for item in preferences[:5]) or '-'}",
+            f"- backup habits: {', '.join(item['value'] for item in habits[:5]) or '-'}",
+            f"- shared topics: {', '.join(item['value'] for item in topics[:6]) or '-'}",
+            f"- soothing patterns: {', '.join(item['value'] for item in soothing[:5]) or '-'}",
         ]
     )
