@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from .textfix import fix_obj
+
 
 class Dataset:
     def __init__(self, prepared_dir: Path):
@@ -14,7 +16,7 @@ class Dataset:
     def _read_json(path: Path) -> dict[str, Any]:
         if not path.exists():
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        return fix_obj(json.loads(path.read_text(encoding="utf-8")))
 
     @staticmethod
     def iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -22,7 +24,7 @@ class Dataset:
             for line in handle:
                 line = line.strip()
                 if line:
-                    yield json.loads(line)
+                    yield fix_obj(json.loads(line))
 
     def iter_messages(self) -> Iterable[dict[str, Any]]:
         yield from self.iter_jsonl(self.prepared_dir / "messages.jsonl")
@@ -32,4 +34,3 @@ class Dataset:
         if not path.exists():
             return []
         return list(self.iter_jsonl(path))
-

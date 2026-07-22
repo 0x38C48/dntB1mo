@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from chatbot_core.config import AppConfig
 from chatbot_core.behavior_runtime import load_or_build_behavior
 from chatbot_core.dataset import Dataset
+from chatbot_core.facts_runtime import load_or_build_facts
 from chatbot_core.llm_runtime import RUNTIME_VERSION, ChatEngine
 from chatbot_core.persona_runtime import load_or_build_persona
 from chatbot_core.retrieval import Retriever
@@ -21,8 +22,9 @@ CONFIG = AppConfig.from_env(ROOT)
 DATASET = Dataset(CONFIG.prepared_dir)
 PERSONA = load_or_build_persona(CONFIG, DATASET)
 BEHAVIOR = load_or_build_behavior(CONFIG, DATASET)
+FACTS = load_or_build_facts(CONFIG, DATASET)
 RETRIEVER = Retriever(DATASET.load_chunks())
-ENGINE = ChatEngine(CONFIG, PERSONA, RETRIEVER)
+ENGINE = ChatEngine(CONFIG, PERSONA, RETRIEVER, FACTS)
 STORE = ChatStore(CONFIG.db_path)
 
 
@@ -91,6 +93,7 @@ class Handler(BaseHTTPRequestHandler):
                     "chunk_count": DATASET.manifest.get("chunk_count"),
                     "date_range": DATASET.manifest.get("date_range"),
                     "behavior_version": BEHAVIOR.get("version"),
+                    "facts_version": FACTS.get("version"),
                     "database": str(CONFIG.db_path),
                 }
             )
@@ -104,6 +107,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/behavior":
             self.send_json(BEHAVIOR)
+            return
+        if parsed.path == "/api/facts":
+            self.send_json(ENGINE.public_facts())
             return
         if parsed.path == "/api/history":
             conversation_id = conversation_id_from(parse_qs(parsed.query).get("conversation_id", ["default"])[0])
@@ -137,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
                     STORE.add_message(conversation_id, "user", part)
                     STORE.remember_from_user_text(conversation_id, part)
                 context = STORE.load_memories(conversation_id)
-                result = ENGINE.reply(message, history, context)
+                result = ENGINE.reply(message, history, context, str(payload.get("mood") or "auto"))
                 STORE.add_message(conversation_id, "assistant", result.get("reply", ""))
                 result["conversation_id"] = conversation_id
                 result["conversation_memory"] = context

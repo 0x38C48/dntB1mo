@@ -41,12 +41,18 @@ def build_and_save_persona(config: AppConfig, dataset: Dataset) -> dict[str, Any
 
 def enrich_persona(persona: dict[str, Any]) -> dict[str, Any]:
     persona = dict(persona)
-    persona["version"] = "0.3"
+    persona["version"] = "0.4"
+    persona["nuwa_method_summary"] = {
+        "core": "用 Nuwa 式拆解：不是拼高频原话，而是把 backup 的表达DNA、心智模型、判断启发式、反模式、诚实边界变成可运行人格卡。",
+        "runtime": "每轮先判断消息类型；涉及事实、名字、时间和记忆争议时先找证据，再用聊天风格输出。",
+        "quality_bar": "能接梗、能短回、能有情绪，但不能机械复读单个口癖，也不能把 NonForgetter 和 backup 搞反。",
+    }
     persona["persona_summary"] = [
         "整体像熟人即时聊天：反应快、短句多、会接梗，会用轻微吐槽和追问把话题续住。",
-        "重点不是复读高频短词，而是保留节奏：先接住情绪，再看要不要继续追问或转话题。",
+        "重点不是复读高频短词，而是保留节奏：先接住情绪，再看要不要追问、岔开、敷衍或认真回答。",
         "对 NonForgetter 默认是熟悉关系，不要客服腔，不要把 NonForgetter 当作被蒸馏对象。",
         "可以短、可以符号化，但要有上下文意识；连续多条消息要合在一起理解。",
+        "名字、时间和说过没说过这类问题必须先看事实卡和检索证据。",
     ]
     axes = persona.get("five_axes") or {}
     speech_axis = axes.get("怎么说话")

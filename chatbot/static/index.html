@@ -39,7 +39,17 @@
         </header>
         <div id="messages" class="messages"></div>
         <form id="chatForm" class="composer">
-          <textarea id="messageInput" rows="2" placeholder="&#22238;&#36710;&#21457;&#36865;&#65292;Shift+Enter &#25442;&#34892;" autocomplete="off"></textarea>
+          <div class="composer-tools">
+            <select id="moodSelect" aria-label="emotion mode">
+              <option value="auto">&#33258;&#21160;&#24773;&#32490;</option>
+              <option value="playful">&#25509;&#26775;</option>
+              <option value="soft">&#36719;&#19968;&#28857;</option>
+              <option value="annoyed">&#19981;&#29245;</option>
+              <option value="sleepy">&#22256;</option>
+              <option value="excited">&#20852;&#22859;</option>
+            </select>
+            <textarea id="messageInput" rows="2" placeholder="&#22238;&#36710;&#21457;&#36865;&#65292;Shift+Enter &#25442;&#34892;" autocomplete="off"></textarea>
+          </div>
           <button type="submit" title="Enter">&#21457;&#36865;</button>
         </form>
       </section>

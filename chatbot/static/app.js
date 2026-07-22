@@ -8,6 +8,7 @@ const messagesEl = document.querySelector("#messages");
 const memoriesEl = document.querySelector("#memories");
 const form = document.querySelector("#chatForm");
 const input = document.querySelector("#messageInput");
+const moodSelect = document.querySelector("#moodSelect");
 const clearBtn = document.querySelector("#clearBtn");
 const collapseLeft = document.querySelector("#collapseLeft");
 const collapseRight = document.querySelector("#collapseRight");
@@ -157,14 +158,16 @@ function renderBehavior(behavior) {
 async function loadStatus() {
   const status = await fetch("/api/status").then((r) => r.json());
   statusEl.textContent = `${status.mode} \u00b7 ${status.runtime_version || ""}`;
-  if (ragBadge && status.rag) ragBadge.textContent = "\u68d7/\u8c10\u97f3 RAG";
+  if (ragBadge && status.rag) ragBadge.textContent = "\u4e8b\u5b9e+\u68d7/\u8c10\u97f3 RAG";
 }
 
 async function loadPersona() {
   const persona = await fetch("/api/persona").then((r) => r.json());
   axesEl.innerHTML = "";
   const summary = persona.persona_summary || [];
-  personaSummaryEl.innerHTML = summary.map((item) => `<p>${item}</p>`).join("");
+  const method = persona.nuwa_method_summary || {};
+  const methodRows = [method.core, method.runtime, method.quality_bar].filter(Boolean);
+  personaSummaryEl.innerHTML = [...summary, ...methodRows].map((item) => `<p>${item}</p>`).join("");
   const axes = persona.five_axes || {};
   for (const key of t.axes) {
     const axis = axes[key];
@@ -199,6 +202,25 @@ async function loadBehavior() {
     if (staticResponse.ok) renderBehavior(await staticResponse.json());
   } catch (_) {
     behaviorEl.innerHTML = "";
+  }
+}
+
+async function loadFacts() {
+  try {
+    const facts = await fetch("/api/facts").then((r) => r.json());
+    const start = facts.known_since ? String(facts.known_since).slice(0, 10) : "-";
+    const days = facts.known_duration_days ?? "-";
+    const node = document.createElement("section");
+    node.className = "axis fact-card";
+    node.innerHTML = `
+      <h2>\u4e8b\u5b9e\u5361</h2>
+      <p>\u540d\u5b57\u5019\u9009\uff1a${facts.top_name || "-"}</p>
+      <p>\u82f1\u6587\u540d\uff1a${facts.top_english_name || "-"}</p>
+      <p>\u8ba4\u8bc6\u8d77\u70b9\uff1a${start} / ${days} \u5929</p>
+    `;
+    personaSummaryEl.after(node);
+  } catch (_) {
+    // Facts are optional for older local servers.
   }
 }
 
@@ -242,7 +264,7 @@ async function flushPendingMessages() {
     const result = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ conversation_id: conversationId, messages: batch }),
+      body: JSON.stringify({ conversation_id: conversationId, messages: batch, mood: moodSelect?.value || "auto" }),
     }).then((r) => r.json());
     meta.remove();
     if (result.error) {
@@ -303,6 +325,7 @@ expandRight.addEventListener("click", () => appShell.classList.remove("right-col
 
 loadStatus();
 loadPersona();
+loadFacts();
 loadBehavior();
 renderMemories([]);
 loadHistory();
