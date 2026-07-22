@@ -18,6 +18,7 @@ from chatbot_core.store import ChatStore
 
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
+WALLPAPER_PATH = Path(r"C:\Users\NonFor\Pictures\25240.jpg")
 CONFIG = AppConfig.from_env(ROOT)
 DATASET = Dataset(CONFIG.prepared_dir)
 PERSONA = load_or_build_persona(CONFIG, DATASET)
@@ -81,6 +82,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "bad_path"}, 400)
                 return
             self.send_static(STATIC_ROOT / safe_name)
+            return
+        if parsed.path == "/api/wallpaper":
+            self.send_static(WALLPAPER_PATH if WALLPAPER_PATH.exists() else STATIC_ROOT / "assets" / "cmd-bg.jpg")
             return
         if parsed.path == "/api/status":
             self.send_json(
