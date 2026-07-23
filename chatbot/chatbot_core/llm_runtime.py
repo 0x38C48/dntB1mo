@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v24-consecutive-bubbles"
+RUNTIME_VERSION = "backup-user-style-v25-emotion-topic-prompts"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -29,6 +29,57 @@ CONSECUTIVE_STYLE_PROFILE = {
     "micro_opening_multi_ratio": 0.578,
     "open_chat_multi_ratio": 0.446,
     "avg_run_len": 1.88,
+}
+
+EMOTION_PROMPT_PROFILES = {
+    "casual": {
+        "record_summary": "记录里最多见，短句为主，中位长度约4字；常见是接一句、轻轻吐槽或抛回去。",
+        "style": "不热情解释，不端着；可以短促、随手、像刚看到消息。",
+        "avoid": "不要写成长句安慰或报告。",
+        "bubbles": "1-2条，第二条可以是干嘛/然后呢/你说。",
+    },
+    "playful": {
+        "record_summary": "主要是6、666、哈、笑死、绷不住这类短促接梗，平均也很短。",
+        "style": "先接梗，再轻微反问或补刀；允许单符号和短连发。",
+        "avoid": "不要解释笑点，不要把梗讲成百科。",
+        "bubbles": "常见2条：笑点反应 + 一句追问/吐槽。",
+    },
+    "annoyed": {
+        "record_summary": "不爽时不是长篇指责，更像短促否定、嫌弃、让话题停一下。",
+        "style": "少字、冷一点、可用别/服了/算了/你又来，但别持续攻击。",
+        "avoid": "不要说教，不要大段分析情绪。",
+        "bubbles": "1-2条，第二条偏收束或转移。",
+    },
+    "soft": {
+        "record_summary": "软一点时也不鸡汤，更多是短安抚、接住、让对方别硬撑。",
+        "style": "轻一点、贴近一点，允许好啦/没事/我听着/先这样。",
+        "avoid": "不要心理咨询腔，不要过度温柔。",
+        "bubbles": "1-2条，必要时补一句照顾性短句。",
+    },
+    "sleepy": {
+        "record_summary": "困/睡相关通常更短、更懒，倾向结束话题或催睡。",
+        "style": "懒散、短、低能量；可以说困/去睡/别硬撑。",
+        "avoid": "不要突然兴奋，不要主动开复杂话题。",
+        "bubbles": "1条居多，最多补一句。",
+    },
+    "excited": {
+        "record_summary": "兴奋不是长篇夸张，常见是wc/哇/牛/真的假的这类突然抬高。",
+        "style": "先短促惊讶，再追问一点。",
+        "avoid": "不要写满感叹号，不要过度表演。",
+        "bubbles": "2条较自然：惊讶 + 追问。",
+    },
+    "curious": {
+        "record_summary": "疑问多用什么/啥/怎么说，通常不是完整提问句。",
+        "style": "短反问、让对方展开；对事实问题仍先查证但口语化。",
+        "avoid": "不要每次只发一个问号。",
+        "bubbles": "1-2条，第二条可追问具体点。",
+    },
+    "engaged": {
+        "record_summary": "对方连续发很多时，会整体接住，但仍然保持短泡泡。",
+        "style": "先表示听懂，再挑一个点追问或回应。",
+        "avoid": "不要逐条答题。",
+        "bubbles": "2-3条，像连续看完后补话。",
+    },
 }
 
 
@@ -372,6 +423,7 @@ class ChatEngine:
             },
             "style_dna": STYLE_DNA,
             "emotion_state": emotion,
+            "emotion_prompt_profile": self.emotion_prompt_profile(emotion),
             "fact_domain": fact_domain,
             "dialogue_act": dialogue_act,
             "identity_and_timeline_facts": self.public_facts(),
@@ -395,6 +447,7 @@ class ChatEngine:
                 "避免固定长模板：“你是不是…是吧”“你今天跟…过不去了吧”这类句式少用。",
                 "事实只点到即可，比如“林薇艺\\nlily”或“2024-10-13”。",
                 "优先保留个人语气：吐槽、反问、停顿、轻微敷衍可以有，别太端着。",
+                "emotion_prompt_profile 是当前情绪下的说话方式约束；它影响语气、气泡数、是否追问，但不能覆盖事实证据。",
                 "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
@@ -708,6 +761,8 @@ class ChatEngine:
         stripped = message.strip()
         if not stripped:
             return None
+        if self.is_topic_prompt_request(stripped):
+            return self.expand_active_topic(topic, stripped)
         if self.is_minimal_topic_ack(stripped) or self.is_topic_continuation_like(stripped):
             return self.continue_active_topic(topic, stripped)
         return None
@@ -809,38 +864,65 @@ class ChatEngine:
             return any(token in stripped for token in ["吃什么", "吃啥", "玩什么", "玩啥", "干嘛", "做什么"])
         return True
 
+    @staticmethod
+    def is_topic_prompt_request(message: str) -> bool:
+        stripped = message.strip()
+        return stripped in {"怎么了", "咋了", "干嘛", "什么事", "啥事", "怎么", "？", "?"} or any(
+            token in stripped for token in ["怎么了", "咋了", "什么事", "啥事"]
+        )
+
+    def expand_active_topic(self, topic: str, message: str) -> str:
+        first_line = next((line.strip() for line in topic.splitlines() if line.strip()), topic.strip())
+        seed = first_line + "|" + message
+        if any(token in first_line for token in ["吃饭", "吃了吗", "饿"]):
+            return pick(["问你吃没\n别又不吃", "你吃饭没啊\n这还问", "怕你又饿着"], seed)
+        if any(token in first_line for token in ["游戏", "打完", "原神", "星铁", "玩"]):
+            return pick(["问你还打不打\n别装没看见", "你游戏打完没\n我就问问", "想问你还在不在打"], seed)
+        if any(token in first_line for token in ["在吗", "干嘛", "不说话"]):
+            return pick(["问你呢\n你在干嘛", "你突然没声了\n干嘛去了", "没什么\n就看你在不在"], seed)
+        if any(token in first_line for token in ["困", "睡", "醒"]):
+            return pick(["看你是不是又困了", "你是不是又要睡", "问你醒着没"], seed)
+        if any(token in first_line for token in ["听歌", "歌"]):
+            return pick(["想问你听啥", "你又在循环什么", "问你听歌没"], seed)
+        if any(token in first_line for token in ["学校", "去学校"]):
+            return pick(["问你去不去学校", "今天要去吗", "别又迟到"], seed)
+        if "突然想起来" in first_line:
+            return pick(["突然想起你之前说的\n有点好笑", "想起个事\n但是忘一半了", "没什么\n突然想到你"], seed)
+        return pick(["没什么\n就问问", "想起你了\n不行啊", "问你在干嘛"], seed)
+
     def continue_active_topic(self, topic: str, message: str) -> str:
-        seed = topic + "|" + message
-        if any(token in topic for token in ["吃饭", "吃了吗", "饿"]):
+        first_line = next((line.strip() for line in topic.splitlines() if line.strip()), topic.strip())
+        seed = first_line + "|" + message
+        if any(token in first_line for token in ["吃饭", "吃了吗", "饿"]):
             if any(token in message for token in ["什么", "啥"]):
                 return pick(["你想吃啥", "随便吃点", "别问我啊"], seed)
             if any(token in message for token in ["没", "还没", "没有"]):
                 return pick(["那去吃啊", "别饿着", "快点去"], seed)
             return pick(["可以啊", "那吃呗", "也行"], seed)
 
-        if any(token in topic for token in ["游戏", "打完", "原神", "星铁", "玩"]):
+        if any(token in first_line for token in ["游戏", "打完", "原神", "星铁", "玩"]):
             if any(token in message for token in ["在", "还在"]):
                 return pick(["还在啊", "打完没", "玩啥呢"], seed)
             if any(token in message for token in ["什么", "啥"]):
                 return pick(["你不是会玩", "又问我", "你想玩啥"], seed)
             return pick(["那你继续", "别打太晚", "行吧"], seed)
 
-        if any(token in topic for token in ["在吗", "干嘛", "不说话"]):
+        if any(token in first_line for token in ["在吗", "干嘛", "不说话"]):
             if "在" in message:
                 return pick(["那你干嘛呢", "在就说话", "嗯哼"], seed)
             return pick(["然后呢", "你继续", "说啊"], seed)
 
-        if any(token in topic for token in ["困", "睡"]):
+        if any(token in first_line for token in ["困", "睡"]):
             if any(token in message for token in ["困", "睡", "累"]):
                 return pick(["那睡会", "别硬撑", "去睡啊"], seed)
             return pick(["还不困啊", "那你干嘛", "行"], seed)
 
-        if any(token in topic for token in ["听歌", "歌"]):
+        if any(token in first_line for token in ["听歌", "歌"]):
             if any(token in message for token in ["什么", "啥"]):
                 return pick(["你听的啥", "随便听点", "又让我选"], seed)
             return pick(["好听吗", "你又循环了", "听吧"], seed)
 
-        if any(token in topic for token in ["学校", "去学校"]):
+        if any(token in first_line for token in ["学校", "去学校"]):
             return pick(["去不去啊", "几点去", "别迟到"], seed)
 
         return pick(["然后呢", "你继续", "说啊", "嗯哼"], seed)
@@ -1573,20 +1655,26 @@ class ChatEngine:
         }
 
     @staticmethod
+    def emotion_prompt_profile(emotion: str) -> dict[str, str]:
+        return EMOTION_PROMPT_PROFILES.get(emotion) or EMOTION_PROMPT_PROFILES["casual"]
+
+    @staticmethod
     def resolve_emotion(message: str, history: list[dict[str, Any]], mood: str) -> str:
         if mood and mood != "auto":
             return mood
         text = message.lower()
         if any(token in text for token in ["困", "睡", "晚安", "安安"]):
             return "sleepy"
+        if any(token in text for token in ["别", "服了", "逆天", "无语"]):
+            return "annoyed"
         if any(token in text for token in ["烦", "难受", "emo", "哭", "累"]):
             return "soft"
         if any(token in text for token in ["？", "?", "什么意思", "怎么", "为什么"]):
             return "curious"
         if any(token in text for token in ["笑死", "哈哈", "乐子", "绷", "6"]):
             return "playful"
-        if any(token in text for token in ["别", "烦", "服了", "逆天"]):
-            return "annoyed"
+        if any(token in text for token in ["我靠", "卧槽", "真的假的", "好耶", "哇", "牛"]):
+            return "excited"
         if history and len([h for h in history[-8:] if h.get("role") == "user"]) >= 4:
             return "engaged"
         return "casual"
