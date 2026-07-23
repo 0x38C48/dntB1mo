@@ -13,9 +13,10 @@ from .facts_runtime import days_since, top_english_name, top_identity_name
 from .retrieval import Retriever
 from .slang import reply_cues
 from .textfix import fix_text
+from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v14-broader-facts"
+RUNTIME_VERSION = "backup-user-style-v15-context-web"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -51,6 +52,10 @@ def pick(items: list[str], seed: str) -> str:
         return ""
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return items[int(digest[:8], 16) % len(items)]
+
+
+def self_match_any(text: str, tokens: list[str]) -> bool:
+    return any(token in text for token in tokens)
 
 
 def is_usable_style_line(text: str) -> bool:
@@ -102,6 +107,31 @@ def compact_reply(text: str, max_chars: int = DEFAULT_MAX_REPLY_CHARS) -> str:
     return "\n".join(bubbles[:1])
 
 
+def compact_explanation(text: str, max_bubbles: int = 3, bubble_chars: int = 24) -> str:
+    cleaned = fix_text(text).strip().strip("“”\"")
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^(联网查了下|搜了下|根据搜索结果)[，,:：\s]*", "", cleaned)
+    pieces = [part.strip() for part in re.split(r"[\n。；;！!]+", cleaned) if part.strip()]
+    bubbles: list[str] = []
+    for piece in pieces:
+        piece = re.sub(r"\s+", " ", piece)
+        if len(piece) > bubble_chars:
+            split_parts = re.split(r"[，,、：:]", piece)
+            for sub in split_parts:
+                sub = sub.strip()
+                if not sub:
+                    continue
+                bubbles.append(sub[:bubble_chars])
+                if len(bubbles) >= max_bubbles:
+                    return "\n".join(bubbles)
+        else:
+            bubbles.append(piece)
+        if len(bubbles) >= max_bubbles:
+            break
+    return "\n".join(bubbles[:max_bubbles]) if bubbles else cleaned[:bubble_chars]
+
+
 def shrink_bubble(text: str) -> str:
     text = text.strip()
     if len(text) <= BUBBLE_MAX_CHARS:
@@ -147,16 +177,21 @@ class ChatEngine:
         memories = self.retriever.search(retrieval_query, limit=10)
         temporary_facts = self.extract_temporary_facts(message, memories, fact_domain)
         emotion = self.resolve_emotion(message, history, mood)
+        web_results = search_web(message, limit=4) if self.should_web_lookup(message) else []
 
         fact_reply = self.fact_first_reply(message, history, memories)
         if fact_reply:
-            fact_text = fact_reply if self.allows_long_reply(message) else compact_reply(fact_reply, FACT_MAX_REPLY_CHARS)
+            if self.is_recent_chat_memory_question(message):
+                fact_text = fact_reply
+            else:
+                fact_text = fact_reply if self.allows_long_reply(message) else compact_reply(fact_reply, FACT_MAX_REPLY_CHARS)
             return {
                 "reply": fact_text,
                 "mode": f"{self.mode}_fact_route",
                 "emotion": emotion,
                 "facts": self.public_facts(),
                 "memories": memories,
+                "web_results": web_results,
             }
 
         if self.is_memory_dispute_question(message) and self.has_memory_evidence(message, history, memories):
@@ -166,6 +201,17 @@ class ChatEngine:
                 "emotion": emotion,
                 "facts": self.public_facts(),
                 "memories": memories,
+                "web_results": web_results,
+            }
+
+        if web_results:
+            return {
+                "reply": self.web_meaning_reply(message, web_results),
+                "mode": "web_search_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
             }
 
         if self.should_route_locally(message):
@@ -175,9 +221,10 @@ class ChatEngine:
                 "emotion": emotion,
                 "facts": self.public_facts(),
                 "memories": memories,
+                "web_results": web_results,
             }
 
-        prompt = self.build_prompt(message, history[-28:], memories, conversation_memory, emotion, fact_domain, temporary_facts)
+        prompt = self.build_prompt(message, history[-48:], memories, conversation_memory, emotion, fact_domain, temporary_facts, web_results)
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
@@ -187,6 +234,7 @@ class ChatEngine:
                     "emotion": emotion,
                     "facts": self.public_facts(),
                     "memories": memories,
+                    "web_results": web_results,
                 }
             except Exception as exc:
                 return {
@@ -196,6 +244,7 @@ class ChatEngine:
                     "emotion": emotion,
                     "facts": self.public_facts(),
                     "memories": memories,
+                    "web_results": web_results,
                 }
         if self.config.openai_api_key:
             try:
@@ -206,6 +255,7 @@ class ChatEngine:
                     "emotion": emotion,
                     "facts": self.public_facts(),
                     "memories": memories,
+                    "web_results": web_results,
                 }
             except Exception as exc:
                 return {
@@ -215,6 +265,7 @@ class ChatEngine:
                     "emotion": emotion,
                     "facts": self.public_facts(),
                     "memories": memories,
+                    "web_results": web_results,
                 }
         return {
             "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
@@ -222,6 +273,7 @@ class ChatEngine:
             "emotion": emotion,
             "facts": self.public_facts(),
             "memories": memories,
+            "web_results": web_results,
         }
 
     def build_prompt(
@@ -233,6 +285,7 @@ class ChatEngine:
         emotion: str,
         fact_domain: str,
         temporary_facts: dict[str, Any],
+        web_results: list[dict[str, str]] | None = None,
     ) -> str:
         axes = self.persona.get("five_axes", {})
         persona_brief = {
@@ -270,6 +323,8 @@ class ChatEngine:
             "recent_assistant_replies": recent_assistant_replies,
             "conversation_memory": conversation_memory,
             "retrieved_memories": memories,
+            "web_search": web_context_for_prompt(web_results or []),
+            "recent_dialogue_state": self.recent_dialogue_state(history),
             "style_samples_from_backup": self.extract_style_lines(memories)[:12],
             "slang_and_homophone_cues": reply_cues(message),
             "user_message": message,
@@ -290,7 +345,9 @@ class ChatEngine:
                 "top_short_phrases 只是风格参考，不是复读清单。",
                 "避免重复 recent_assistant_replies 中的句式；意思接近也要换角度。",
                 "遇到多行 user_message，代表 NonForgetter 连续发了多条消息，要整体理解后回复。",
+                "遇到“刚刚/刚才/上一句/之前我说了什么/你回答了什么”，必须优先看 recent_dialogue_state，不要装作没看到。",
                 "遇到谐音梗、网络梗、拼音缩写时按语境接住情绪和笑点，不要机械解释。",
+                "如果 web_search.result_count > 0，说明已经联网；解释梗时优先综合 web_search，证据弱就说像是/可能是。",
                 "不要声称自己是真人本人。",
             ],
         }
@@ -441,8 +498,16 @@ class ChatEngine:
         max_chars = 90 if self.allows_long_reply(message) else DEFAULT_MAX_REPLY_CHARS
         return compact_reply(cleaned, max_chars)
 
+    def polish_web_reply(self, text: str, message: str, web_results: list[dict[str, str]]) -> str:
+        cleaned = fix_text(text).strip().strip("“”\"")
+        if not cleaned or self.looks_like_denial(cleaned):
+            return self.web_meaning_reply(message, web_results)
+        return compact_explanation(cleaned)
+
     def fact_first_reply(self, message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str | None:
         stripped = message.strip()
+        if self.is_recent_chat_memory_question(stripped):
+            return self.recent_chat_reply(stripped, history)
         if self.is_bot_identity_question(stripped):
             name = top_identity_name(self.facts)
             english = top_english_name(self.facts)
@@ -480,6 +545,35 @@ class ChatEngine:
         if self.is_memory_dispute_question(stripped) and self.has_memory_evidence(stripped, history, memories):
             return self.memory_evidence_reply(stripped, history, memories)
         return None
+
+    @staticmethod
+    def recent_chat_reply(message: str, history: list[dict[str, Any]]) -> str:
+        def recent(role: str, limit: int = 3) -> list[str]:
+            rows = [
+                str(item.get("content", "")).strip()
+                for item in history
+                if item.get("role") == role and str(item.get("content", "")).strip()
+            ]
+            return rows[-limit:]
+
+        user_rows = recent("user")
+        assistant_rows = recent("assistant")
+        if any(token in message for token in ["你刚刚", "你刚才", "你上一句", "你前面", "你回答", "她回答", "backup回答"]):
+            if not assistant_rows:
+                return "我还没回啥"
+            return "我刚回：\n" + assistant_rows[-1][:48]
+        if any(token in message for token in ["我刚刚", "我刚才", "我上一句", "我前面", "之前我", "前面我"]):
+            if not user_rows:
+                return "你还没说啥"
+            return "你刚说：\n" + user_rows[-1][:48]
+        rows = []
+        for item in history[-6:]:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            speaker = "你" if item.get("role") == "user" else "我"
+            rows.append(f"{speaker}: {content[:34]}")
+        return "刚才大概是：\n" + "\n".join(rows[-4:]) if rows else "刚才没啥"
 
     def birthday_reply(self, message: str) -> str | None:
         person = "backup"
@@ -783,6 +877,25 @@ class ChatEngine:
         ]
 
     @staticmethod
+    def recent_dialogue_state(history: list[dict[str, Any]]) -> dict[str, Any]:
+        recent = [
+            {
+                "role": str(item.get("role", "")),
+                "content": str(item.get("content", "")).strip()[:160],
+            }
+            for item in history[-24:]
+            if str(item.get("content", "")).strip()
+        ]
+        user_messages = [item["content"] for item in recent if item["role"] == "user"][-8:]
+        assistant_replies = [item["content"] for item in recent if item["role"] == "assistant"][-8:]
+        return {
+            "last_turns": recent,
+            "last_user_messages": user_messages,
+            "last_assistant_replies": assistant_replies,
+            "rule": "这是当前不断线聊天的短期记忆。用户追问刚才/之前说了什么时，直接引用这里，不要去猜。",
+        }
+
+    @staticmethod
     def resolve_emotion(message: str, history: list[dict[str, Any]], mood: str) -> str:
         if mood and mood != "auto":
             return mood
@@ -820,6 +933,21 @@ class ChatEngine:
         return pick(["我换个说法", "刚刚那句不算", "等下，我重说", "不是那个意思"], stripped + emotion)
 
     @staticmethod
+    def web_meaning_reply(message: str, web_results: list[dict[str, str]]) -> str:
+        titles = " / ".join(row.get("title", "") for row in web_results[:3] if row.get("title"))
+        haystack = f"{message} {titles}"
+        if any(token in haystack for token in ["别这么说", "别说这种话", "别说xx这种话", "别说 xx 这种话"]):
+            return "查了下\n像劝停吐槽梗\n不算固定出处"
+        if any(token in titles for token in ["你还别说", "真别说", "别说了", "下次别说"]):
+            return "像那类梗\n让人别继续说\n带点吐槽"
+        if web_results:
+            title = fix_text(web_results[0].get("title", "")).strip("_ ")[:22]
+            return f"搜到像这个\n{title}\n得看上下文"
+        if "乐子" in message or "乐乐" in message:
+            return "乐子那个乐\n看热闹的意思"
+        return "没搜稳\n可能只是语境梗"
+
+    @staticmethod
     def is_repeated_reply(reply: str, history: list[dict[str, Any]]) -> bool:
         raw_reply = re.sub(r"\s+", "", reply or "")
         normalized_reply = ChatEngine.normalize_for_repeat(reply)
@@ -851,6 +979,24 @@ class ChatEngine:
     @staticmethod
     def is_memory_dispute_question(message: str) -> bool:
         return any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "绝对没有", "有记录"])
+
+    @staticmethod
+    def is_recent_chat_memory_question(message: str) -> bool:
+        recent_tokens = ["刚刚", "刚才", "上一句", "前一句", "前面", "之前", "上面"]
+        memory_tokens = ["说了什么", "说什么", "说过什么", "讲了什么", "聊了什么", "回答了什么", "回了什么", "你回答", "她回答"]
+        if any(token in message for token in recent_tokens) and any(token in message for token in memory_tokens):
+            return True
+        return any(token in message for token in ["我刚刚说的啥", "我刚才说的啥", "你刚刚回的啥", "你刚才回的啥"])
+
+    @staticmethod
+    def should_web_lookup(message: str) -> bool:
+        if len(message.strip()) > 80:
+            return False
+        lookup_tokens = ["是什么梗", "啥梗", "什么梗", "网络梗", "出自哪里", "出处", "热梗", "梗图"]
+        meaning_tokens = ["什么意思", "啥意思", "什么含义"]
+        if any(token in message for token in lookup_tokens):
+            return True
+        return any(token in message for token in meaning_tokens) and any(token in message for token in ["梗", "网络", "弹幕", "贴吧", "b站", "B站", "微博", "抖音"])
 
     @staticmethod
     def looks_like_denial(reply: str) -> bool:
@@ -1036,14 +1182,14 @@ class ChatEngine:
 
     @staticmethod
     def extract_conversation_evidence(message: str, history: list[dict[str, Any]]) -> list[dict[str, str]]:
-        if not any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "姓", "名字", "绝对没有"]):
+        if not any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "姓", "名字", "绝对没有", "刚才", "刚刚", "上一句", "前面", "之前", "回答"]):
             return []
         rows: list[dict[str, str]] = []
-        for item in history[-18:]:
+        for item in history[-30:]:
             content = str(item.get("content", "")).strip()
             if not content:
                 continue
-            if any(token in content for token in ["乐乐", "姓", "林", "名字", "英文名", "lily", "说过", "记得"]):
+            if self_match_any(content, ["乐乐", "姓", "林", "名字", "英文名", "lily", "说过", "记得"]) or any(token in message for token in ["刚才", "刚刚", "上一句", "前面", "之前", "回答"]):
                 rows.append({"role": str(item.get("role", "")), "content": content})
         return rows[-8:]
 

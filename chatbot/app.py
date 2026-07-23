@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "mode": ENGINE.mode,
                     "runtime_version": RUNTIME_VERSION,
-                    "rag": "slang_homophone_expansion",
+                    "rag": "slang_homophone_web_and_recent_context",
                     "message_count": DATASET.manifest.get("message_count"),
                     "chunk_count": DATASET.manifest.get("chunk_count"),
                     "date_range": DATASET.manifest.get("date_range"),
@@ -176,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     parts = [str(payload.get("message", "")).strip()]
                     message = parts[0]
-                history = STORE.load_messages(conversation_id, limit=80)
+                history = STORE.load_messages(conversation_id, limit=160)
                 if not message:
                     self.send_json({"error": "empty_message"}, 400)
                     return
