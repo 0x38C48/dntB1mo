@@ -185,6 +185,14 @@ class Handler(BaseHTTPRequestHandler):
                     STORE.remember_from_user_text(conversation_id, part)
                 context = STORE.load_memories(conversation_id)
                 result = ENGINE.reply(message, history, context, str(payload.get("mood") or "auto"))
+                result["reply"] = ENGINE.apply_consecutive_style(
+                    str(result.get("reply", "")),
+                    message,
+                    history,
+                    str(result.get("mode") or ""),
+                    result.get("memories") or [],
+                    str(result.get("emotion") or "casual"),
+                )
                 STORE.add_message(conversation_id, "assistant", result.get("reply", ""))
                 result["conversation_id"] = conversation_id
                 result["conversation_memory"] = context
@@ -199,7 +207,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/proactive":
                 payload = self.read_json()
                 conversation_id = conversation_id_from(payload.get("conversation_id"))
+                history = STORE.load_messages(conversation_id, limit=80)
                 reply = proactive_reply(conversation_id)
+                reply = ENGINE.apply_consecutive_style(
+                    reply,
+                    reply,
+                    history,
+                    "local_proactive",
+                    [],
+                    str(payload.get("mood") or "casual"),
+                )
                 STORE.add_message(conversation_id, "assistant", reply)
                 STORE.remember_active_topic(conversation_id, reply)
                 self.send_json(

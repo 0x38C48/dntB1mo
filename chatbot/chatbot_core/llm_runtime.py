@@ -17,12 +17,19 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v23-softer-fact-style"
+RUNTIME_VERSION = "backup-user-style-v24-consecutive-bubbles"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
 FACT_STYLE_MAX_REPLY_CHARS = 32
 BUBBLE_MAX_CHARS = 12
+
+CONSECUTIVE_STYLE_PROFILE = {
+    "observed_multi_run_ratio": 0.487,
+    "micro_opening_multi_ratio": 0.578,
+    "open_chat_multi_ratio": 0.446,
+    "avg_run_len": 1.88,
+}
 
 
 NUWA_PROTOCOL = [
@@ -382,7 +389,7 @@ class ChatEngine:
             "slang_and_homophone_cues": reply_cues(message),
             "user_message": message,
             "output_rules": [
-                "默认像微信短消息：1-2个短泡泡，单泡泡尽量不超过12个中文字符。",
+                "默认像微信短消息：通常1-2个短泡泡，接话/吐槽/情绪上来时可以2-3个，单泡泡尽量不超过12个中文字符。",
                 "除非用户明确要求详细，不要解释来龙去脉，不要写完整报告句。",
                 "能说“又来了”就不要说“你是不是又在……”。",
                 "避免固定长模板：“你是不是…是吧”“你今天跟…过不去了吧”这类句式少用。",
@@ -414,7 +421,7 @@ class ChatEngine:
             "input": [
                 {
                     "role": "system",
-                    "content": "You simulate backup's concise Chinese WeChat style. Reply in 1-2 micro chat bubbles, usually under 12 Chinese chars each. Evidence outranks improvisation, but never sound like a report.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in micro chat bubbles, usually 1-2 but often 2-3 when the turn feels like quick consecutive messages. Keep each bubble short. Evidence outranks improvisation, but never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -440,7 +447,7 @@ class ChatEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You simulate backup's concise Chinese WeChat style. Reply in 1-2 micro chat bubbles, usually under 12 Chinese chars each. Evidence outranks improvisation, but never sound like a report.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in micro chat bubbles, usually 1-2 but often 2-3 when the turn feels like quick consecutive messages. Keep each bubble short. Evidence outranks improvisation, but never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -558,6 +565,118 @@ class ChatEngine:
         if not cleaned or self.looks_like_denial(cleaned):
             return self.web_meaning_reply(message, web_results)
         return compact_explanation(cleaned)
+
+    def apply_consecutive_style(
+        self,
+        reply: str,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        mode: str = "",
+        memories: list[dict[str, Any]] | None = None,
+        emotion: str = "casual",
+    ) -> str:
+        text = fix_text(reply).strip()
+        if not text or self.allows_long_reply(message):
+            return text
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return text
+        if len(lines) >= 3:
+            return "\n".join(lines[:3])
+
+        probability = self.consecutive_probability(message, mode, lines, history or [], emotion)
+        seed = "|".join([message, text, mode, emotion, str(len(history or []))])
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        roll = int(digest[:8], 16) / 0xFFFFFFFF
+        if roll >= probability:
+            return "\n".join(lines)
+
+        extra = self.consecutive_tail(message, "\n".join(lines), mode, memories or [], emotion)
+        if not extra:
+            return "\n".join(lines)
+        extra_lines = [line.strip() for line in extra.splitlines() if line.strip()]
+        for line in extra_lines:
+            if line and line not in lines and len(lines) < 3 and not self.is_near_duplicate_line(line, lines):
+                lines.append(line)
+        return "\n".join(lines)
+
+    def consecutive_probability(
+        self,
+        message: str,
+        mode: str,
+        lines: list[str],
+        history: list[dict[str, Any]],
+        emotion: str,
+    ) -> float:
+        text = message.strip()
+        if "web" in mode:
+            base = 0.22
+        elif any(token in mode for token in ["fact", "evidence", "memory"]):
+            base = 0.34
+        elif any(token in mode for token in ["topic_continuation", "chat_act", "repair"]):
+            base = 0.56
+        else:
+            base = CONSECUTIVE_STYLE_PROFILE["open_chat_multi_ratio"]
+
+        if len(text) <= 3 or self.is_minimal_topic_ack(text):
+            base = max(base, CONSECUTIVE_STYLE_PROFILE["micro_opening_multi_ratio"])
+        if "\n" in message:
+            base += 0.06
+        if emotion in {"playful", "annoyed", "engaged", "curious"}:
+            base += 0.06
+        if len(lines) == 2:
+            base *= 0.35
+        recent_user_count = sum(1 for item in history[-8:] if item.get("role") == "user")
+        if recent_user_count >= 4:
+            base += 0.05
+        return max(0.08, min(0.68, base))
+
+    def consecutive_tail(
+        self,
+        message: str,
+        reply: str,
+        mode: str,
+        memories: list[dict[str, Any]],
+        emotion: str,
+    ) -> str:
+        seed = message + "|" + reply + "|" + mode + "|" + emotion
+        if any(token in mode for token in ["fact", "evidence", "memory"]):
+            if self.is_bot_identity_question(message) or self.is_user_identity_question(message):
+                return pick(["又来", "别装", "你猜"], seed)
+            if self.is_time_question(message):
+                return pick(["你还问", "好久了", "差不多"], seed)
+            if self.is_wake_time_question(message):
+                return pick(["别装早起", "真不早", "你自己想"], seed)
+            if self.is_birthday_question(message):
+                return pick(["别诈我", "应该吧", "我记得"], seed)
+            return pick(["差不多", "我印象是", "别问了"], seed)
+
+        if self.is_question_like(message):
+            return pick(["你说呢", "怎么了", "又问"], seed)
+        if emotion == "annoyed":
+            return pick(["服了", "别太离谱", "你又来"], seed)
+        if emotion == "soft":
+            return pick(["先这样", "慢慢来", "我听着"], seed)
+        if emotion == "playful":
+            return pick(["笑死", "又乐", "6"], seed)
+        if len(message.strip()) <= 3:
+            return pick(["然后呢", "说啊", "干嘛"], seed)
+
+        return pick(["然后呢", "你继续", "说啊", "嗯哼", "干嘛"], seed)
+
+    @staticmethod
+    def is_near_duplicate_line(line: str, existing: list[str]) -> bool:
+        normalized = ChatEngine.normalize_for_repeat(line)
+        for old in existing:
+            old_normalized = ChatEngine.normalize_for_repeat(old)
+            if not normalized or not old_normalized:
+                continue
+            if normalized == old_normalized:
+                return True
+            if SequenceMatcher(None, normalized, old_normalized).ratio() >= 0.72:
+                return True
+        return False
 
     def conversation_repair_reply(self, message: str, history: list[dict[str, Any]]) -> str | None:
         if not self.is_conversation_repair_question(message):
