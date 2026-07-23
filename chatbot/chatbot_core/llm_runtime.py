@@ -16,7 +16,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v19-human-memory-wording"
+RUNTIME_VERSION = "backup-user-style-v20-dialogue-act-router"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -178,9 +178,21 @@ class ChatEngine:
         memories = self.rerank_memories_for_question(message, memories)
         temporary_facts = self.extract_temporary_facts(message, memories, fact_domain)
         emotion = self.resolve_emotion(message, history, mood)
+        dialogue_act = self.classify_dialogue_act(message)
         web_results = search_web(message, limit=4) if self.should_web_lookup(message) else []
 
-        fact_reply = self.fact_first_reply(message, history, memories)
+        repair_reply = self.conversation_repair_reply(message, history)
+        if repair_reply:
+            return {
+                "reply": repair_reply,
+                "mode": f"{self.mode}_repair_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
+        fact_reply = self.fact_first_reply(message, history, memories) if self.should_answer_fact_first(message) else None
         if fact_reply:
             if self.is_recent_chat_memory_question(message):
                 fact_text = fact_reply
@@ -215,6 +227,27 @@ class ChatEngine:
                 "web_results": web_results,
             }
 
+        if self.is_first_person_preference_statement(message):
+            return {
+                "reply": self.preference_statement_reply(message),
+                "mode": f"{self.mode}_chat_act_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
+        food_chat_reply = self.food_chat_reply(message)
+        if food_chat_reply:
+            return {
+                "reply": food_chat_reply,
+                "mode": f"{self.mode}_chat_act_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
         if self.should_route_locally(message):
             return {
                 "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
@@ -225,7 +258,7 @@ class ChatEngine:
                 "web_results": web_results,
             }
 
-        prompt = self.build_prompt(message, history[-48:], memories, conversation_memory, emotion, fact_domain, temporary_facts, web_results)
+        prompt = self.build_prompt(message, history[-48:], memories, conversation_memory, emotion, fact_domain, temporary_facts, web_results, dialogue_act)
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
@@ -287,6 +320,7 @@ class ChatEngine:
         fact_domain: str,
         temporary_facts: dict[str, Any],
         web_results: list[dict[str, str]] | None = None,
+        dialogue_act: str = "open_chat",
     ) -> str:
         axes = self.persona.get("five_axes", {})
         persona_brief = {
@@ -315,6 +349,7 @@ class ChatEngine:
             "style_dna": STYLE_DNA,
             "emotion_state": emotion,
             "fact_domain": fact_domain,
+            "dialogue_act": dialogue_act,
             "identity_and_timeline_facts": self.public_facts(),
             "temporary_facts_from_retrieval": temporary_facts,
             "fact_retrieval_policy": self.facts.get("retrieval_policy", {}),
@@ -346,6 +381,8 @@ class ChatEngine:
                 "top_short_phrases 只是风格参考，不是复读清单。",
                 "避免重复 recent_assistant_replies 中的句式；意思接近也要换角度。",
                 "遇到多行 user_message，代表 NonForgetter 连续发了多条消息，要整体理解后回复。",
+                "如果 dialogue_act 是 casual_statement 或 preference_statement，先接住对方这句话，不要像问卷一样回答事实标签。",
+                "如果 dialogue_act 是 repair_request，承认上一句接偏了，短促重来，不要继续解释。",
                 "遇到“刚刚/刚才/上一句/之前我说了什么/你回答了什么”，必须优先看 recent_dialogue_state，用“你刚说/我刚回”回答，不要说“看到记录”。",
                 "遇到谐音梗、网络梗、拼音缩写时按语境接住情绪和笑点，不要机械解释。",
                 "如果 web_search.result_count > 0，说明已经联网；解释梗时优先综合 web_search，证据弱就说像是/可能是。",
@@ -504,6 +541,36 @@ class ChatEngine:
         if not cleaned or self.looks_like_denial(cleaned):
             return self.web_meaning_reply(message, web_results)
         return compact_explanation(cleaned)
+
+    def conversation_repair_reply(self, message: str, history: list[dict[str, Any]]) -> str | None:
+        if not self.is_conversation_repair_question(message):
+            return None
+        last_assistant = next(
+            (
+                str(item.get("content", "")).strip()
+                for item in reversed(history)
+                if item.get("role") == "assistant" and str(item.get("content", "")).strip()
+            ),
+            "",
+        )
+        if last_assistant:
+            return pick(["我刚才接歪了", "我乱说了\n重来", "等下\n刚才不对"], message + last_assistant)
+        return "我说岔了"
+
+    @staticmethod
+    def preference_statement_reply(message: str) -> str:
+        if any(token in message for token in ["喜欢玩", "爱玩", "挺喜欢玩"]):
+            return pick(["那你玩啥", "玩啥啊", "那还挺好"], message)
+        if any(token in message for token in ["喜欢吃", "爱吃", "想吃"]):
+            return pick(["吃啥", "那吃呗", "你又饿了"], message)
+        return pick(["嗯哼", "然后呢", "你继续"], message)
+
+    @staticmethod
+    def food_chat_reply(message: str) -> str | None:
+        stripped = message.strip()
+        if stripped in {"吃什么", "吃啥", "吃点什么", "吃啥啊"}:
+            return pick(["你想吃啥", "随便吃点", "别问我啊"], stripped)
+        return None
 
     def fact_first_reply(self, message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str | None:
         stripped = message.strip()
@@ -1197,6 +1264,41 @@ class ChatEngine:
         return any(token in message for token in meaning_tokens) and any(token in message for token in ["梗", "网络", "弹幕", "贴吧", "b站", "B站", "微博", "抖音"])
 
     @staticmethod
+    def is_conversation_repair_question(message: str) -> bool:
+        if ChatEngine.should_web_lookup(message):
+            return False
+        return any(
+            token in message
+            for token in [
+                "你在说什么",
+                "你说什么",
+                "你说啥",
+                "说什么啊",
+                "什么东西",
+                "这啥玩意",
+                "啥玩意",
+                "你是不是乱说",
+                "你接的什么",
+            ]
+        )
+
+    @staticmethod
+    def is_first_person_preference_statement(message: str) -> bool:
+        if ChatEngine.is_question_like(message):
+            return False
+        return message.startswith("我") and any(
+            token in message
+            for token in [
+                "喜欢玩",
+                "爱玩",
+                "挺喜欢玩",
+                "喜欢吃",
+                "爱吃",
+                "想吃",
+            ]
+        )
+
+    @staticmethod
     def is_play_preference_question(message: str) -> bool:
         return any(token in message for token in ["喜欢玩什么", "喜欢玩啥", "爱玩什么", "爱玩啥", "平时玩什么", "平时玩啥", "玩什么游戏", "玩啥游戏", "玩什么"])
 
@@ -1415,6 +1517,46 @@ class ChatEngine:
         return "?" in message or "？" in message or any(token in message for token in ["什么", "怎么", "为什么", "吗"])
 
     @staticmethod
+    def should_answer_fact_first(message: str) -> bool:
+        if ChatEngine.is_recent_chat_memory_question(message) or ChatEngine.is_identity_correction(message):
+            return True
+        if ChatEngine.is_user_identity_question(message) or ChatEngine.is_bot_identity_question(message):
+            return True
+        if ChatEngine.is_time_question(message) or ChatEngine.is_wake_time_question(message):
+            return True
+        if ChatEngine.is_memory_dispute_question(message):
+            return True
+        if ChatEngine.is_birthday_question(message) or ChatEngine.is_relationship_question(message):
+            return ChatEngine.is_question_like(message)
+        if ChatEngine.is_soothing_question(message) or ChatEngine.is_topic_question(message):
+            return ChatEngine.is_question_like(message)
+        if ChatEngine.is_emotion_history_question(message):
+            return ChatEngine.is_question_like(message)
+        if ChatEngine.is_preference_question(message):
+            return True
+        if ChatEngine.is_nickname_question(message) or ChatEngine.is_habit_question(message):
+            return ChatEngine.is_question_like(message)
+        return False
+
+    @staticmethod
+    def classify_dialogue_act(message: str) -> str:
+        if ChatEngine.is_conversation_repair_question(message):
+            return "repair_request"
+        if ChatEngine.is_recent_chat_memory_question(message):
+            return "recent_memory_question"
+        if ChatEngine.should_web_lookup(message):
+            return "web_knowledge_question"
+        if ChatEngine.should_answer_fact_first(message):
+            return "fact_question"
+        if ChatEngine.is_first_person_preference_statement(message):
+            return "preference_statement"
+        if ChatEngine.is_question_like(message):
+            return "open_question"
+        if len(message.strip()) <= 2:
+            return "minimal_ack"
+        return "casual_statement"
+
+    @staticmethod
     def is_bot_identity_question(message: str) -> bool:
         if ChatEngine.is_user_identity_question(message):
             return False
@@ -1496,7 +1638,9 @@ class ChatEngine:
 
     @staticmethod
     def is_preference_question(message: str) -> bool:
-        return any(token in message for token in ["喜欢什么", "讨厌什么", "不喜欢什么", "爱吃什么", "想吃什么", "偏好", "喜欢吃", "喜欢玩"])
+        if not ChatEngine.is_question_like(message):
+            return False
+        return any(token in message for token in ["喜欢什么", "讨厌什么", "不喜欢什么", "爱吃什么", "想吃什么", "偏好", "喜欢吃", "喜欢玩", "爱玩", "玩什么", "玩啥"])
 
     @staticmethod
     def is_habit_question(message: str) -> bool:
