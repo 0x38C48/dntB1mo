@@ -16,7 +16,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v16-user-identity-guard"
+RUNTIME_VERSION = "backup-user-style-v17-grounded-preferences"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -175,6 +175,7 @@ class ChatEngine:
         fact_domain = self.classify_fact_domain(message)
         retrieval_query = self.build_retrieval_query(message, history)
         memories = self.retriever.search(retrieval_query, limit=10)
+        memories = self.rerank_memories_for_question(message, memories)
         temporary_facts = self.extract_temporary_facts(message, memories, fact_domain)
         emotion = self.resolve_emotion(message, history, mood)
         web_results = search_web(message, limit=4) if self.should_web_lookup(message) else []
@@ -541,7 +542,7 @@ class ChatEngine:
         if self.is_emotion_history_question(stripped):
             return self.emotion_history_reply(stripped)
         if self.is_preference_question(stripped):
-            return self.category_fact_reply(stripped, "preferences")
+            return self.category_fact_reply(stripped, "preferences", memories)
         if self.is_nickname_question(stripped):
             return self.category_fact_reply(stripped, "nicknames")
         if self.is_habit_question(stripped):
@@ -703,7 +704,15 @@ class ChatEngine:
             return "有波动\n记录里能看"
         return None
 
-    def category_fact_reply(self, message: str, section: str) -> str | None:
+    def category_fact_reply(self, message: str, section: str, memories: list[dict[str, Any]] | None = None) -> str | None:
+        memories = memories or []
+        if section == "preferences":
+            if self.is_play_preference_question(message):
+                return self.play_preference_reply(message, memories)
+            if self.is_food_preference_question(message):
+                return self.food_preference_reply(message, memories)
+            if any(token in message for token in ["喜欢什么", "喜欢啥", "有什么喜欢", "偏好"]):
+                return "太泛了\n问吃的还是玩的"
         person = "backup"
         if section == "nicknames":
             if any(token in message for token in ["叫我", "喊我", "称呼我"]):
@@ -722,6 +731,105 @@ class ChatEngine:
         if len(labels) == 1:
             return f"像是{labels[0]}"
         return f"{labels[0]}\n还有{labels[1]}"
+
+    def play_preference_reply(self, message: str, memories: list[dict[str, Any]]) -> str:
+        person = "NonForgetter" if any(token in message for token in ["我喜欢", "我爱玩", "我玩什么"]) else "backup"
+        labels = self.extract_play_labels(memories, person)
+        if labels:
+            if len(labels) == 1:
+                return f"只翻稳{labels[0]}\n别的没稳"
+            if len(labels) == 2:
+                return f"{labels[0]}\n还有{labels[1]}"
+            return f"{labels[0]}、{labels[1]}\n{labels[2]}也有"
+        if self.has_shared_topic("games"):
+            return "记录里像二游\n具体要再翻"
+        return "没翻到稳的\n别硬猜"
+
+    def rerank_memories_for_question(self, message: str, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self.is_play_preference_question(message):
+            return memories
+        person = "NonForgetter" if any(token in message for token in ["我喜欢", "我爱玩", "我玩什么"]) else "backup"
+        scored = [
+            (self.play_memory_score(memory, person), float(memory.get("score") or 0), index, memory)
+            for index, memory in enumerate(memories)
+        ]
+        scored.sort(key=lambda item: (item[0], item[1], -item[2]), reverse=True)
+        return [memory for _, _, _, memory in scored]
+
+    @staticmethod
+    def play_memory_score(memory: dict[str, Any], person: str) -> int:
+        role_prefix = "target[text]:" if person == "NonForgetter" else "user[text]:"
+        score = 0
+        for line in fix_text(memory.get("text") or "").splitlines():
+            line = line.strip()
+            if not line.startswith(role_prefix):
+                continue
+            content = line.split(":", 1)[1].strip()
+            labels = ChatEngine.extract_play_labels([{"text": line}], person)
+            if labels and ChatEngine.is_positive_play_context(content):
+                score += 10 + len(labels)
+        return score
+
+    def food_preference_reply(self, message: str, memories: list[dict[str, Any]]) -> str:
+        labels = self.extract_food_labels(memories)
+        if labels:
+            return "\n".join(labels[:2])
+        return "吃的没稳\n只看到常聊吃饭"
+
+    @staticmethod
+    def extract_play_labels(memories: list[dict[str, Any]], person: str) -> list[str]:
+        role_prefix = "target[text]:" if person == "NonForgetter" else "user[text]:"
+        aliases: list[tuple[str, tuple[str, ...]]] = [
+            ("原神", ("原神", "尘歌壶", "跑图")),
+            ("星铁", ("星铁", "崩铁", "星穹铁道")),
+            ("绝区零", ("绝区零", "zzz", "ZZZ")),
+            ("鸣潮", ("鸣潮",)),
+            ("Steam", ("steam", "Steam")),
+            ("瓦", ("玩瓦", "打瓦", "瓦罗兰特", "无畏契约")),
+            ("MC", ("mc", "MC", "我的世界")),
+        ]
+        counts: dict[str, int] = {label: 0 for label, _ in aliases}
+        for memory in memories:
+            for line in fix_text(memory.get("text") or "").splitlines():
+                line = line.strip()
+                if not line.startswith(role_prefix):
+                    continue
+                content = line.split(":", 1)[1].strip()
+                for label, terms in aliases:
+                    if any(term in content for term in terms) and ChatEngine.is_positive_play_context(content):
+                        counts[label] += 1
+        ranked = sorted(((count, label) for label, count in counts.items() if count > 0), reverse=True)
+        return [label for _, label in ranked[:4]]
+
+    @staticmethod
+    def is_positive_play_context(content: str) -> bool:
+        negative = ["没玩", "不玩", "没打", "不打", "不好玩", "不想玩", "玩不来", "没玩过", "不玩啦"]
+        if any(token in content for token in negative):
+            return False
+        activity = ["玩", "打", "登", "上号", "任务", "跑图", "尘歌壶", "抽", "通关", "开黑", "退", "级"]
+        return any(token in content for token in activity)
+
+    @staticmethod
+    def extract_food_labels(memories: list[dict[str, Any]]) -> list[str]:
+        aliases: list[tuple[str, tuple[str, ...]]] = [
+            ("咖啡/瑞幸", ("瑞幸", "咖啡")),
+            ("不太想吃食堂", ("不想吃食堂", "食堂")),
+            ("吃饭", ("吃饭", "晚饭", "午饭")),
+        ]
+        counts: dict[str, int] = {label: 0 for label, _ in aliases}
+        for memory in memories:
+            for line in fix_text(memory.get("text") or "").splitlines():
+                if not line.strip().startswith("user[text]:"):
+                    continue
+                content = line.split(":", 1)[1].strip()
+                for label, terms in aliases:
+                    if any(term in content for term in terms):
+                        counts[label] += 1
+        ranked = sorted(((count, label) for label, count in counts.items() if count > 0), reverse=True)
+        return [label for _, label in ranked[:3]]
+
+    def has_shared_topic(self, value: str) -> bool:
+        return any(item.get("value") == value for item in self.facts.get("shared_topics") or [])
 
     def shared_topic_reply(self, message: str) -> str | None:
         rows = (self.facts.get("shared_topics") or [])[:4]
@@ -1089,6 +1197,14 @@ class ChatEngine:
         return any(token in message for token in meaning_tokens) and any(token in message for token in ["梗", "网络", "弹幕", "贴吧", "b站", "B站", "微博", "抖音"])
 
     @staticmethod
+    def is_play_preference_question(message: str) -> bool:
+        return any(token in message for token in ["喜欢玩什么", "喜欢玩啥", "爱玩什么", "爱玩啥", "平时玩什么", "平时玩啥", "玩什么游戏", "玩啥游戏", "玩什么"])
+
+    @staticmethod
+    def is_food_preference_question(message: str) -> bool:
+        return any(token in message for token in ["喜欢吃什么", "喜欢吃啥", "爱吃什么", "爱吃啥", "喜欢喝什么", "爱喝什么", "吃什么", "喝什么"])
+
+    @staticmethod
     def looks_like_denial(reply: str) -> bool:
         return any(token in reply for token in ["不知道", "没印象", "没说过", "记错", "没有吧", "不记得", "我咋知道"])
 
@@ -1176,6 +1292,10 @@ class ChatEngine:
             expansions.extend(["情绪 心情 难受 伤心 生气 哭 emo 破防 委屈 崩溃 困 累 起伏"])
         if domain == "preference":
             expansions.extend(["喜欢 不喜欢 讨厌 想吃 爱吃 好看 好听 想玩 想要 偏好"])
+        if ChatEngine.is_play_preference_question(message):
+            expansions.extend(["玩什么 游戏 原神 星铁 崩铁 绝区零 zzz 鸣潮 steam 瓦罗兰特 无畏契约 mc 尘歌壶 跑图"])
+        if ChatEngine.is_food_preference_question(message):
+            expansions.extend(["吃什么 喝什么 吃饭 晚饭 瑞幸 咖啡 食堂 饿了 代餐"])
         if domain == "habit":
             expansions.extend(["习惯 平时 睡觉 起床 熬夜 吃饭 上课 考试 家里 身体 不舒服"])
         if domain == "nickname":
