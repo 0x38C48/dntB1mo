@@ -165,7 +165,8 @@ function renderBehavior(behavior) {
   behaviorEl.innerHTML = `
     <section class="axis">
       <h2>\u65f6\u95f4\u884c\u4e3a</h2>
-      <p>backup \u4e3b\u52a8\u5f00\u8bdd\u9898\u7684\u4e2d\u4f4d\u95f4\u9694\uff1a${topic.median_gap_minutes ?? "-"} min</p>
+      <p>backup \u4e3b\u52a8\u5f00\u8bdd\u9898\u7684\u6709\u6548\u4e2d\u4f4d\u95f4\u9694\uff1a${topic.median_active_gap_minutes ?? topic.median_gap_minutes ?? "-"} min</p>
+      <p>\u5df2\u6392\u9664\u7761\u7720\u7a97\u53e3\uff1a${topic.sleep_window_excluded || "03:00-11:00"}</p>
       <p>\u5bf9\u53e6\u4e00\u4fa7\u6d88\u606f\u6162\u56de/\u4e0d\u56de\u6bd4\u4f8b\uff1a${response.slow_or_no_reply_ratio ?? "-"}</p>
       <div class="tags">${topCats}</div>
     </section>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -17,13 +17,16 @@ OTHER_ROLE = "target"
 FAST_REPLY_SECONDS = 10 * 60
 SLOW_REPLY_SECONDS = 60 * 60
 TOPIC_GAP_SECONDS = 45 * 60
+SLEEP_START = time(3, 0)
+SLEEP_END = time(11, 0)
+BEHAVIOR_VERSION = "0.3"
 
 
 def load_or_build_behavior(config: AppConfig, dataset: Dataset) -> dict[str, Any]:
     path = config.persona_dir / "behavior_analysis.json"
     if path.exists():
         cached = json.loads(path.read_text(encoding="utf-8"))
-        if cached.get("version") == "0.2":
+        if cached.get("version") == BEHAVIOR_VERSION:
             return cached
     analysis = analyze_behavior(dataset)
     config.persona_dir.mkdir(parents=True, exist_ok=True)
@@ -77,6 +80,30 @@ def gap_label(seconds: float | None) -> str:
     return ">8h"
 
 
+def active_gap_seconds(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    if end <= start:
+        return 0.0
+    total = (end - start).total_seconds()
+    sleeping = sleeping_overlap_seconds(start, end)
+    return max(0.0, total - sleeping)
+
+
+def sleeping_overlap_seconds(start: datetime, end: datetime) -> float:
+    total = 0.0
+    current_day = start.date()
+    while current_day <= end.date():
+        sleep_start = datetime.combine(current_day, SLEEP_START)
+        sleep_end = datetime.combine(current_day, SLEEP_END)
+        overlap_start = max(start, sleep_start)
+        overlap_end = min(end, sleep_end)
+        if overlap_end > overlap_start:
+            total += (overlap_end - overlap_start).total_seconds()
+        current_day += timedelta(days=1)
+    return total
+
+
 def analyze_behavior(dataset: Dataset) -> dict[str, Any]:
     messages = [
         msg
@@ -99,15 +126,18 @@ def analyze_behavior(dataset: Dataset) -> dict[str, Any]:
         role = msg.get("speaker_role")
         ts = parse_time(msg.get("timestamp"))
         prev_ts = parse_time(prev_msg.get("timestamp")) if prev_msg else None
-        gap = (ts - prev_ts).total_seconds() if ts and prev_ts else None
+        raw_gap = (ts - prev_ts).total_seconds() if ts and prev_ts else None
+        gap = active_gap_seconds(prev_ts, ts)
 
         if role == STYLE_ROLE and (prev_msg is None or (gap is not None and gap >= TOPIC_GAP_SECONDS)):
             initiations.append(
                 {
                     "message_id": msg.get("message_id"),
                     "timestamp": msg.get("timestamp"),
-                    "gap_seconds": gap,
+                    "active_gap_seconds": gap,
+                    "raw_gap_seconds": raw_gap,
                     "gap_label": gap_label(gap),
+                    "raw_gap_label": gap_label(raw_gap),
                     "hour_bucket": hour_bucket(ts),
                     "content_type": msg.get("content_type"),
                     "text": text_of(msg)[:80],
@@ -161,12 +191,14 @@ def analyze_behavior(dataset: Dataset) -> dict[str, Any]:
     fast = sum(1 for x in target_reply_outcomes if x["outcome"] == "fast_reply")
 
     return {
-        "version": "0.2",
+        "version": BEHAVIOR_VERSION,
         "style_role": STYLE_ROLE,
         "style_aliases": ["backup", "ZyjT82011"],
         "topic_initiation": {
-            "definition": "backup/user message that starts after >=45 minutes of silence",
+            "definition": "backup/user message that starts after >=45 minutes of active silence; daily sleep window 03:00-11:00 is excluded from gap time",
+            "sleep_window_excluded": "03:00-11:00",
             "count": len(initiations),
+            "median_active_gap_minutes": round(median(topic_gap_values) / 60, 1) if topic_gap_values else None,
             "median_gap_minutes": round(median(topic_gap_values) / 60, 1) if topic_gap_values else None,
             "gap_distribution": dict(Counter(item["gap_label"] for item in initiations)),
             "hour_distribution": dict(hour_counts),
@@ -218,7 +250,8 @@ def render_behavior_md(analysis: dict[str, Any]) -> str:
         "## Topic Initiation",
         "",
         f"- Count: {topic['count']}",
-        f"- Median gap: {topic['median_gap_minutes']} minutes",
+        f"- Median active gap: {topic.get('median_active_gap_minutes', topic.get('median_gap_minutes'))} minutes",
+        f"- Sleep window excluded: {topic.get('sleep_window_excluded', '03:00-11:00')}",
         f"- Gap distribution: {topic['gap_distribution']}",
         f"- Hour distribution: {topic['hour_distribution']}",
         "",
