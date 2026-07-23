@@ -16,7 +16,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v18-natural-uncertainty"
+RUNTIME_VERSION = "backup-user-style-v19-human-memory-wording"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -340,13 +340,13 @@ class ChatEngine:
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
                 "身份/名字/时间/是否说过的问题必须优先使用 identity_and_timeline_facts 和 retrieved_memories。",
-                "生日、情感经历、情绪起伏等事实问题必须先使用 temporary_facts_from_retrieval；证据不足就说“没看到/不太确定/只看到一点”，不要说“稳不稳”这种工程词。",
+                "生日、情感经历、情绪起伏等事实问题必须先使用 temporary_facts_from_retrieval；证据不足时用真人记忆口吻说“我不记得/我想想/好像/只记得一点”，不要说“记录/检索/看到/证据/稳不稳”。",
                 "如果 temporary_facts_from_retrieval 已经足够回答，只做语气压缩，不要改事实。",
                 "有明确证据时不要说“不知道/没印象”。",
                 "top_short_phrases 只是风格参考，不是复读清单。",
                 "避免重复 recent_assistant_replies 中的句式；意思接近也要换角度。",
                 "遇到多行 user_message，代表 NonForgetter 连续发了多条消息，要整体理解后回复。",
-                "遇到“刚刚/刚才/上一句/之前我说了什么/你回答了什么”，必须优先看 recent_dialogue_state，不要装作没看到。",
+                "遇到“刚刚/刚才/上一句/之前我说了什么/你回答了什么”，必须优先看 recent_dialogue_state，用“你刚说/我刚回”回答，不要说“看到记录”。",
                 "遇到谐音梗、网络梗、拼音缩写时按语境接住情绪和笑点，不要机械解释。",
                 "如果 web_search.result_count > 0，说明已经联网；解释梗时优先综合 web_search，证据弱就说像是/可能是。",
                 "不要声称自己是真人本人。",
@@ -519,7 +519,7 @@ class ChatEngine:
             if self.is_bot_surname_question(stripped):
                 if name and name[0]:
                     return f"姓{name[0]}"
-                return "没看到姓什么"
+                return "你姓什么\n我不记得"
             if name and english:
                 return pick(
                     [
@@ -590,15 +590,15 @@ class ChatEngine:
         if any(token in message for token in ["姓什么", "我姓啥", "我姓什么", "我什么姓"]):
             if user_surname:
                 return f"你姓{user_surname}"
-            return "没看到你说过\n刚才我串了"
+            return "我不记得你说过\n刚才我串了"
         if any(token in message for token in ["英文名", "english name", "English name"]):
             english = self.extract_user_identity_from_history(history, "english")
             if english:
                 return english
-            return "你英文名\n我没看到"
+            return "你英文名\n我不记得"
         if user_name:
             return user_name
-        return "NonForgetter吧\n真名没看到"
+        return "NonForgetter吧\n真名我不记得"
 
     @staticmethod
     def extract_user_identity_from_history(history: list[dict[str, Any]], kind: str) -> str | None:
@@ -668,7 +668,7 @@ class ChatEngine:
             person = "backup"
         candidates = (self.facts.get("birthdays", {}).get(person) or [])[:3]
         if not candidates:
-            return "没看到"
+            return "我不记得"
         top = candidates[0]
         if top.get("score", 0) <= 1 and len(candidates) > 1:
             return f"{top.get('value')}\n但不太确定"
@@ -686,7 +686,7 @@ class ChatEngine:
         if "care" in values and "affection" in values:
             return "挺熟的\n有照顾"
         if values:
-            return "记录里有\n得看片段"
+            return "有印象\n但得想想"
         return None
 
     def emotion_history_reply(self, message: str) -> str | None:
@@ -701,7 +701,7 @@ class ChatEngine:
         if "sleepy_tired" in values:
             return "常见是困累"
         if values:
-            return "有波动\n记录里能看"
+            return "有波动\n我有印象"
         return None
 
     def category_fact_reply(self, message: str, section: str, memories: list[dict[str, Any]] | None = None) -> str | None:
@@ -726,7 +726,7 @@ class ChatEngine:
                 person = "backup"
         rows = (self.facts.get(section, {}).get(person) or [])[:4]
         if not rows:
-            return "没看到"
+            return "我不记得"
         labels = [self.display_fact_label(row.get("value", "")) for row in rows[:2]]
         if len(labels) == 1:
             return f"像是{labels[0]}"
@@ -737,13 +737,13 @@ class ChatEngine:
         labels = self.extract_play_labels(memories, person)
         if labels:
             if len(labels) == 1:
-                return f"只看到{labels[0]}\n别的没看到"
+                return f"只记得{labels[0]}\n别的想不起来"
             if len(labels) == 2:
                 return f"{labels[0]}\n还有{labels[1]}"
             return f"{labels[0]}、{labels[1]}\n{labels[2]}也有"
         if self.has_shared_topic("games"):
-            return "记录里像二游\n具体要再翻"
-        return "没看到具体的\n别硬猜"
+            return "像二游\n具体想不起来"
+        return "具体想不起来\n别让我硬猜"
 
     def rerank_memories_for_question(self, message: str, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not self.is_play_preference_question(message):
@@ -774,7 +774,7 @@ class ChatEngine:
         labels = self.extract_food_labels(memories)
         if labels:
             return "\n".join(labels[:2])
-        return "吃的没看到\n只看到常聊吃饭"
+        return "吃的想不起来\n只记得老聊吃饭"
 
     @staticmethod
     def extract_play_labels(memories: list[dict[str, Any]], person: str) -> list[str]:
@@ -834,14 +834,14 @@ class ChatEngine:
     def shared_topic_reply(self, message: str) -> str | None:
         rows = (self.facts.get("shared_topics") or [])[:4]
         if not rows:
-            return "没看到"
+            return "我不记得"
         labels = [self.display_fact_label(row.get("value", "")) for row in rows[:3]]
         return "\n".join(labels[:3])
 
     def soothing_reply(self, message: str) -> str | None:
         rows = (self.facts.get("soothing_patterns") or [])[:3]
         if not rows:
-            return "没看到"
+            return "我不记得"
         labels = [self.display_fact_label(row.get("value", "")) for row in rows[:2]]
         return "\n".join(labels)
 
@@ -907,7 +907,7 @@ class ChatEngine:
                         samples.append((chunk_hour, line))
 
         if not samples:
-            return "没看到准点\n但不像六点"
+            return "准点想不起来\n但不像六点"
 
         weighted = sorted(samples, key=lambda item: item[0])
         median = weighted[len(weighted) // 2][0]
@@ -1134,10 +1134,10 @@ class ChatEngine:
             return "像那类梗\n让人别继续说\n带点吐槽"
         if web_results:
             title = fix_text(web_results[0].get("title", "")).strip("_ ")[:22]
-            return f"搜到像这个\n{title}\n得看上下文"
+            return f"像这个\n{title}\n得看上下文"
         if "乐子" in message or "乐乐" in message:
             return "乐子那个乐\n看热闹的意思"
-        return "没搜到准的\n可能只是语境梗"
+        return "不太确定\n可能只是语境梗"
 
     @staticmethod
     def is_repeated_reply(reply: str, history: list[dict[str, Any]]) -> bool:
