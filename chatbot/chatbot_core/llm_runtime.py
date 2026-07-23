@@ -17,10 +17,11 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v22-active-topic-continuity"
+RUNTIME_VERSION = "backup-user-style-v23-softer-fact-style"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
+FACT_STYLE_MAX_REPLY_CHARS = 32
 BUBBLE_MAX_CHARS = 12
 
 
@@ -213,7 +214,7 @@ class ChatEngine:
             if self.is_recent_chat_memory_question(message):
                 fact_text = fact_reply
             else:
-                fact_text = fact_reply if self.allows_long_reply(message) else compact_reply(fact_reply, FACT_MAX_REPLY_CHARS)
+                fact_text = self.humanize_fact_reply(message, fact_reply, memories, history)
             return {
                 "reply": fact_text,
                 "mode": f"{self.mode}_fact_route",
@@ -739,6 +740,136 @@ class ChatEngine:
         if stripped in {"吃什么", "吃啥", "吃点什么", "吃啥啊"}:
             return pick(["你想吃啥", "随便吃点", "别问我啊"], stripped)
         return None
+
+    def humanize_fact_reply(
+        self,
+        message: str,
+        fact_reply: str,
+        memories: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+    ) -> str:
+        answer = fix_text(fact_reply).strip()
+        if not answer:
+            return answer
+        if self.allows_long_reply(message):
+            return answer
+        if self.is_recent_chat_memory_question(message):
+            return answer
+
+        compact_answer = self.fact_answer_atom(answer)
+        if not compact_answer:
+            return answer
+        if any(token in compact_answer for token in ["不记得", "想不起来", "不太确定"]):
+            return pick(
+                [
+                    f"{compact_answer}\n别逼我",
+                    f"{compact_answer}\n我想想",
+                    f"{compact_answer}\n真忘了",
+                ],
+                message + compact_answer,
+            )
+
+        if self.is_bot_identity_question(message):
+            return pick(
+                [
+                    f"又问这个\n{compact_answer}",
+                    f"{compact_answer}\n你猜的那个",
+                    f"不是说过\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_user_identity_question(message):
+            return pick(
+                [
+                    f"你啊\n{compact_answer}",
+                    f"{compact_answer}\n还问",
+                    f"我记得是\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_birthday_question(message):
+            return pick(
+                [
+                    f"好像{compact_answer}",
+                    f"{compact_answer}\n别又诈我",
+                    f"我记得是\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_time_question(message):
+            compact_answer = self.casual_time_atom(message, compact_answer)
+            return pick(
+                [
+                    f"挺久了\n{compact_answer}",
+                    f"那会吧\n{compact_answer}",
+                    f"你还问\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_wake_time_question(message):
+            return pick(
+                [
+                    f"大概{compact_answer}",
+                    f"{compact_answer}\n别装早起",
+                    f"我记得差不多\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_preference_question(message) or self.is_topic_question(message):
+            return pick(
+                [
+                    f"像是{compact_answer}",
+                    f"{compact_answer}\n这类吧",
+                    f"我印象里\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_relationship_question(message) or self.is_emotion_history_question(message):
+            return pick(
+                [
+                    f"{compact_answer}\n反正挺明显",
+                    f"大概就{compact_answer}",
+                    f"我印象是\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+        if self.is_memory_dispute_question(message):
+            return pick(
+                [
+                    f"{compact_answer}\n你又不信",
+                    f"有印象\n{compact_answer}",
+                    f"差不多这个\n{compact_answer}",
+                ],
+                message + compact_answer,
+            )
+
+        style_lines = self.extract_style_lines(memories)[:4]
+        return pick(
+            [f"我记得是\n{compact_answer}", f"应该是\n{compact_answer}", f"{compact_answer}\n差不多"] + style_lines,
+            message + compact_answer + str(len(history)),
+        )
+
+    @staticmethod
+    def casual_time_atom(message: str, answer: str) -> str:
+        if not any(token in message for token in ["多久", "多长"]):
+            return answer
+        match = re.search(r"(20\d{2})-(\d{1,2})(?:-\d{1,2})?", answer)
+        if not match:
+            return answer
+        year = int(match.group(1)) % 100
+        month = int(match.group(2))
+        return f"{year}年{month}月那会"
+
+    @staticmethod
+    def fact_answer_atom(answer: str) -> str:
+        compacted = compact_reply(answer, FACT_MAX_REPLY_CHARS)
+        lines = [line.strip() for line in compacted.splitlines() if line.strip()]
+        if not lines:
+            return compacted
+        if len(lines) == 1:
+            return lines[0]
+        joined = "，".join(lines[:2])
+        return joined if len(joined) <= FACT_MAX_REPLY_CHARS else lines[0]
 
     def fact_first_reply(self, message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str | None:
         stripped = message.strip()
