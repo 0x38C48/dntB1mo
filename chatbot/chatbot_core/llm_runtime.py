@@ -16,7 +16,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v20-dialogue-act-router"
+RUNTIME_VERSION = "backup-user-style-v21-evasive-repair-style"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -382,7 +382,7 @@ class ChatEngine:
                 "避免重复 recent_assistant_replies 中的句式；意思接近也要换角度。",
                 "遇到多行 user_message，代表 NonForgetter 连续发了多条消息，要整体理解后回复。",
                 "如果 dialogue_act 是 casual_statement 或 preference_statement，先接住对方这句话，不要像问卷一样回答事实标签。",
-                "如果 dialogue_act 是 repair_request，承认上一句接偏了，短促重来，不要继续解释。",
+                "如果 dialogue_act 是 repair_request，用“不是/算了/哎呀/你别管/那咋了”这类含糊转移，不要说“我换个说法/我重说/我接歪了/我生成错了”。",
                 "遇到“刚刚/刚才/上一句/之前我说了什么/你回答了什么”，必须优先看 recent_dialogue_state，用“你刚说/我刚回”回答，不要说“看到记录”。",
                 "遇到谐音梗、网络梗、拼音缩写时按语境接住情绪和笑点，不要机械解释。",
                 "如果 web_search.result_count > 0，说明已经联网；解释梗时优先综合 web_search，证据弱就说像是/可能是。",
@@ -554,8 +554,8 @@ class ChatEngine:
             "",
         )
         if last_assistant:
-            return pick(["我刚才接歪了", "我乱说了\n重来", "等下\n刚才不对"], message + last_assistant)
-        return "我说岔了"
+            return pick(["不是", "哎呀\n算了", "你别管", "好吧\n当我没说", "那咋了", "没事"], message + last_assistant)
+        return pick(["什么", "啊？", "不是"], message)
 
     @staticmethod
     def preference_statement_reply(message: str) -> str:
@@ -577,7 +577,7 @@ class ChatEngine:
         if self.is_recent_chat_memory_question(stripped):
             return self.recent_chat_reply(stripped, history)
         if self.is_identity_correction(stripped):
-            return "哦对\n我串了"
+            return "哦不对\n是我的"
         if self.is_user_identity_question(stripped):
             return self.user_identity_reply(stripped, history, memories)
         if self.is_bot_identity_question(stripped):
@@ -657,7 +657,7 @@ class ChatEngine:
         if any(token in message for token in ["姓什么", "我姓啥", "我姓什么", "我什么姓"]):
             if user_surname:
                 return f"你姓{user_surname}"
-            return "我不记得你说过\n刚才我串了"
+            return "我不记得你说过\n哦不对"
         if any(token in message for token in ["英文名", "english name", "English name"]):
             english = self.extract_user_identity_from_history(history, "english")
             if english:
@@ -1189,7 +1189,7 @@ class ChatEngine:
             return self.slang_meaning_reply(stripped)
         if self.is_meaning_question(stripped):
             return self.meaning_reply(stripped)
-        return pick(["我换个说法", "刚刚那句不算", "等下，我重说", "不是那个意思"], stripped + emotion)
+        return pick(["不是", "算了", "你别管", "哎呀", "好吧", "那咋了", "没事"], stripped + emotion)
 
     @staticmethod
     def web_meaning_reply(message: str, web_results: list[dict[str, str]]) -> str:
