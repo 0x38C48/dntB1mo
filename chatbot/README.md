@@ -36,7 +36,7 @@ http://127.0.0.1:8765
 
 ```powershell
 $env:SOPHNET_API_KEY="..."
-$env:SOPHNET_MODEL="DeepSeek-V4-Flash"
+$env:SOPHNET_MODEL="GLM-5.2"
 ```
 
 也可以使用 OpenAI 兼容配置：

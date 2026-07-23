@@ -129,6 +129,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "mode": ENGINE.mode,
                     "runtime_version": RUNTIME_VERSION,
+                    "sophnet_model": CONFIG.sophnet_model,
                     "rag": "slang_homophone_web_and_recent_context",
                     "message_count": DATASET.manifest.get("message_count"),
                     "chunk_count": DATASET.manifest.get("chunk_count"),

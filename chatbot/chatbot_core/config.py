@@ -55,6 +55,6 @@ class AppConfig:
             openai_model=env_value(local_env, "OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
             openai_base_url=env_value(local_env, "OPENAI_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1",
             sophnet_api_key=env_value(local_env, "SOPHNET_API_KEY"),
-            sophnet_model=env_value(local_env, "SOPHNET_MODEL", "DeepSeek-V4-Flash") or "DeepSeek-V4-Flash",
+            sophnet_model=env_value(local_env, "SOPHNET_MODEL", "GLM-5.2") or "GLM-5.2",
             sophnet_base_url=env_value(local_env, "SOPHNET_BASE_URL", "https://www.sophnet.com/api/open-apis/v1") or "https://www.sophnet.com/api/open-apis/v1",
         )
