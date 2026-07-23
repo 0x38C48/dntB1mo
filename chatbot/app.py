@@ -201,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
                 conversation_id = conversation_id_from(payload.get("conversation_id"))
                 reply = proactive_reply(conversation_id)
                 STORE.add_message(conversation_id, "assistant", reply)
+                STORE.remember_active_topic(conversation_id, reply)
                 self.send_json(
                     {
                         "reply": reply,

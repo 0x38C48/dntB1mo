@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
@@ -99,6 +100,18 @@ class ChatStore:
             conn.execute(
                 "INSERT INTO memories(conversation_id, kind, content, created_at) VALUES (?, ?, ?, ?)",
                 (conversation_id, "user_fact", text, time.time()),
+            )
+
+    def remember_active_topic(self, conversation_id: str, topic: str) -> None:
+        text = (topic or "").strip()
+        if not text:
+            return
+        payload = json.dumps({"topic": text[:80], "source": "proactive"}, ensure_ascii=False)
+        with self.connect() as conn:
+            conn.execute("DELETE FROM memories WHERE conversation_id = ? AND kind = ?", (conversation_id, "active_topic"))
+            conn.execute(
+                "INSERT INTO memories(conversation_id, kind, content, created_at) VALUES (?, ?, ?, ?)",
+                (conversation_id, "active_topic", payload, time.time()),
             )
 
     def load_memories(self, conversation_id: str, limit: int = 20) -> list[dict[str, Any]]:

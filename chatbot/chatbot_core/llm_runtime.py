@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import urllib.request
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -16,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v21-evasive-repair-style"
+RUNTIME_VERSION = "backup-user-style-v22-active-topic-continuity"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -180,12 +181,27 @@ class ChatEngine:
         emotion = self.resolve_emotion(message, history, mood)
         dialogue_act = self.classify_dialogue_act(message)
         web_results = search_web(message, limit=4) if self.should_web_lookup(message) else []
+        active_topic_blocked = self.should_break_active_topic(message)
+        prompt_conversation_memory = (
+            self.without_active_topic(conversation_memory) if active_topic_blocked else conversation_memory
+        )
 
         repair_reply = self.conversation_repair_reply(message, history)
         if repair_reply:
             return {
                 "reply": repair_reply,
                 "mode": f"{self.mode}_repair_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
+        topic_reply = self.active_topic_reply(message, history, conversation_memory)
+        if topic_reply:
+            return {
+                "reply": topic_reply,
+                "mode": f"{self.mode}_topic_continuation_route",
                 "emotion": emotion,
                 "facts": self.public_facts(),
                 "memories": memories,
@@ -258,12 +274,12 @@ class ChatEngine:
                 "web_results": web_results,
             }
 
-        prompt = self.build_prompt(message, history[-48:], memories, conversation_memory, emotion, fact_domain, temporary_facts, web_results, dialogue_act)
+        prompt = self.build_prompt(message, history[-48:], memories, prompt_conversation_memory, emotion, fact_domain, temporary_facts, web_results, dialogue_act)
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
                 return {
-                    "reply": self.polish_model_reply(text, message, memories, history, conversation_memory, emotion),
+                    "reply": self.polish_model_reply(text, message, memories, history, prompt_conversation_memory, emotion),
                     "mode": self.mode,
                     "emotion": emotion,
                     "facts": self.public_facts(),
@@ -272,7 +288,7 @@ class ChatEngine:
                 }
             except Exception as exc:
                 return {
-                    "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
+                    "reply": compact_reply(self.local_reply(message, memories, prompt_conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
                     "mode": "local_fallback_after_sophnet_error",
                     "api_error": str(exc),
                     "emotion": emotion,
@@ -284,7 +300,7 @@ class ChatEngine:
             try:
                 text = self.call_model_api(prompt)
                 return {
-                    "reply": self.polish_model_reply(text, message, memories, history, conversation_memory, emotion),
+                    "reply": self.polish_model_reply(text, message, memories, history, prompt_conversation_memory, emotion),
                     "mode": self.mode,
                     "emotion": emotion,
                     "facts": self.public_facts(),
@@ -293,7 +309,7 @@ class ChatEngine:
                 }
             except Exception as exc:
                 return {
-                    "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
+                    "reply": compact_reply(self.local_reply(message, memories, prompt_conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
                     "mode": "local_fallback_after_api_error",
                     "api_error": str(exc),
                     "emotion": emotion,
@@ -302,7 +318,7 @@ class ChatEngine:
                     "web_results": web_results,
                 }
         return {
-            "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
+            "reply": compact_reply(self.local_reply(message, memories, prompt_conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
             "mode": self.mode,
             "emotion": emotion,
             "facts": self.public_facts(),
@@ -556,6 +572,158 @@ class ChatEngine:
         if last_assistant:
             return pick(["不是", "哎呀\n算了", "你别管", "好吧\n当我没说", "那咋了", "没事"], message + last_assistant)
         return pick(["什么", "啊？", "不是"], message)
+
+    def active_topic_reply(
+        self,
+        message: str,
+        history: list[dict[str, Any]],
+        conversation_memory: list[dict[str, Any]],
+    ) -> str | None:
+        topic = self.latest_active_topic(conversation_memory)
+        if not topic or self.should_break_active_topic(message):
+            return None
+        if not self.last_assistant_matches_topic(history, topic):
+            return None
+
+        stripped = message.strip()
+        if not stripped:
+            return None
+        if self.is_minimal_topic_ack(stripped) or self.is_topic_continuation_like(stripped):
+            return self.continue_active_topic(topic, stripped)
+        return None
+
+    @staticmethod
+    def without_active_topic(conversation_memory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [item for item in conversation_memory if item.get("kind") != "active_topic"]
+
+    @staticmethod
+    def latest_active_topic(conversation_memory: list[dict[str, Any]]) -> str | None:
+        now = time.time()
+        for item in conversation_memory:
+            if item.get("kind") != "active_topic":
+                continue
+            try:
+                created_at = float(item.get("created_at") or 0)
+            except (TypeError, ValueError):
+                created_at = 0
+            if created_at and now - created_at > 20 * 60:
+                continue
+
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            try:
+                payload = json.loads(content)
+                topic = str(payload.get("topic", "")).strip()
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                topic = content
+            if topic:
+                return topic[:80]
+        return None
+
+    @staticmethod
+    def last_assistant_matches_topic(history: list[dict[str, Any]], topic: str) -> bool:
+        assistants = [
+            str(item.get("content", "")).strip()
+            for item in history[-8:]
+            if item.get("role") == "assistant" and str(item.get("content", "")).strip()
+        ]
+        if not assistants:
+            return False
+        recent = assistants[-4:]
+        return any(
+            topic in item or item in topic or SequenceMatcher(None, item, topic).ratio() >= 0.55
+            for item in recent
+        )
+
+    def should_break_active_topic(self, message: str) -> bool:
+        if self.should_web_lookup(message) or self.is_conversation_repair_question(message):
+            return True
+        checkers = [
+            self.is_recent_chat_memory_question,
+            self.is_identity_correction,
+            self.is_user_identity_question,
+            self.is_bot_identity_question,
+            self.is_birthday_question,
+            self.is_relationship_question,
+            self.is_soothing_question,
+            self.is_topic_question,
+            self.is_emotion_history_question,
+            self.is_preference_question,
+            self.is_nickname_question,
+            self.is_habit_question,
+            self.is_wake_time_question,
+            self.is_time_question,
+            self.is_memory_dispute_question,
+        ]
+        return any(checker(message) for checker in checkers)
+
+    @staticmethod
+    def is_minimal_topic_ack(message: str) -> bool:
+        stripped = message.strip()
+        return stripped in {
+            "在",
+            "嗯",
+            "嗯嗯",
+            "好",
+            "啊",
+            "哦",
+            "噢",
+            "行",
+            "可以",
+            "还在",
+            "没",
+            "没有",
+            "还没",
+            "不知道",
+            "?",
+            "？",
+        }
+
+    @staticmethod
+    def is_topic_continuation_like(message: str) -> bool:
+        stripped = message.strip()
+        if len(stripped) > 40:
+            return False
+        if re.search(r"(什么|啥|怎么|哪|几点|多久|生日|名字|是谁|为什么|吗)$", stripped):
+            return any(token in stripped for token in ["吃什么", "吃啥", "玩什么", "玩啥", "干嘛", "做什么"])
+        return True
+
+    def continue_active_topic(self, topic: str, message: str) -> str:
+        seed = topic + "|" + message
+        if any(token in topic for token in ["吃饭", "吃了吗", "饿"]):
+            if any(token in message for token in ["什么", "啥"]):
+                return pick(["你想吃啥", "随便吃点", "别问我啊"], seed)
+            if any(token in message for token in ["没", "还没", "没有"]):
+                return pick(["那去吃啊", "别饿着", "快点去"], seed)
+            return pick(["可以啊", "那吃呗", "也行"], seed)
+
+        if any(token in topic for token in ["游戏", "打完", "原神", "星铁", "玩"]):
+            if any(token in message for token in ["在", "还在"]):
+                return pick(["还在啊", "打完没", "玩啥呢"], seed)
+            if any(token in message for token in ["什么", "啥"]):
+                return pick(["你不是会玩", "又问我", "你想玩啥"], seed)
+            return pick(["那你继续", "别打太晚", "行吧"], seed)
+
+        if any(token in topic for token in ["在吗", "干嘛", "不说话"]):
+            if "在" in message:
+                return pick(["那你干嘛呢", "在就说话", "嗯哼"], seed)
+            return pick(["然后呢", "你继续", "说啊"], seed)
+
+        if any(token in topic for token in ["困", "睡"]):
+            if any(token in message for token in ["困", "睡", "累"]):
+                return pick(["那睡会", "别硬撑", "去睡啊"], seed)
+            return pick(["还不困啊", "那你干嘛", "行"], seed)
+
+        if any(token in topic for token in ["听歌", "歌"]):
+            if any(token in message for token in ["什么", "啥"]):
+                return pick(["你听的啥", "随便听点", "又让我选"], seed)
+            return pick(["好听吗", "你又循环了", "听吧"], seed)
+
+        if any(token in topic for token in ["学校", "去学校"]):
+            return pick(["去不去啊", "几点去", "别迟到"], seed)
+
+        return pick(["然后呢", "你继续", "说啊", "嗯哼"], seed)
 
     @staticmethod
     def preference_statement_reply(message: str) -> str:
