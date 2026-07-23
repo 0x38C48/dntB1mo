@@ -32,7 +32,23 @@ const conversationId = "nonforgetter-default";
 let chatHistory = [];
 let pendingUserMessages = [];
 let pendingTimer = null;
+let proactiveTimer = null;
+let lastActivityAt = Date.now();
 let sending = false;
+
+const HUMAN_TIMING = {
+  batchWindowMs: 1300,
+  nextBatchWindowMs: 900,
+  minThinkMs: 950,
+  factThinkMs: 1500,
+  perUserCharMs: 8,
+  perReplyCharMs: 18,
+  maxThinkMs: 3600,
+  bubbleGapMs: 720,
+  bubbleGapJitterMs: 520,
+  proactiveIdleMs: 3 * 60 * 1000,
+  proactiveThinkMs: 1500,
+};
 
 function hashString(value) {
   let hash = 2166136261;
@@ -45,6 +61,20 @@ function hashString(value) {
 
 function pickClient(items, seed) {
   return items[hashString(seed) % items.length];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scheduleProactive() {
+  if (proactiveTimer) clearTimeout(proactiveTimer);
+  proactiveTimer = setTimeout(triggerProactive, HUMAN_TIMING.proactiveIdleMs);
+}
+
+function markActivity() {
+  lastActivityAt = Date.now();
+  scheduleProactive();
 }
 
 function polishClientReply(reply, userText) {
@@ -119,13 +149,67 @@ function addTypingIndicator() {
   return node;
 }
 
-function addBotReply(text) {
+function inferMinimumReplyDelay(result, reply, batch) {
+  const mode = String(result?.mode || "");
+  const userText = batch.join("\n");
+  const factLike = mode.includes("fact") || mode.includes("memory") || mode.includes("evidence");
+  const base = factLike ? HUMAN_TIMING.factThinkMs : HUMAN_TIMING.minThinkMs;
+  const reading = Math.min(900, userText.length * HUMAN_TIMING.perUserCharMs);
+  const composing = Math.min(1400, String(reply || "").length * HUMAN_TIMING.perReplyCharMs);
+  const jitterSeed = `${mode}|${userText}|${reply}`;
+  const jitter = hashString(jitterSeed) % 520;
+  return Math.min(HUMAN_TIMING.maxThinkMs, base + reading + composing + jitter);
+}
+
+function bubbleGapFor(part, index) {
+  const jitter = hashString(`${part}|${index}`) % HUMAN_TIMING.bubbleGapJitterMs;
+  return HUMAN_TIMING.bubbleGapMs + jitter;
+}
+
+async function addBotReply(text) {
   const parts = String(text || "").split(/\n+/).map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) {
     addMessage("bot", "\uff1f");
     return;
   }
-  for (const part of parts) addMessage("bot", part);
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index > 0) await sleep(bubbleGapFor(parts[index], index));
+    addMessage("bot", parts[index]);
+  }
+}
+
+async function triggerProactive() {
+  const hasPendingInput = input.value.trim().length > 0;
+  const idleFor = Date.now() - lastActivityAt;
+  if (document.hidden || sending || pendingUserMessages.length > 0 || hasPendingInput || idleFor < HUMAN_TIMING.proactiveIdleMs - 1000) {
+    scheduleProactive();
+    return;
+  }
+
+  sending = true;
+  const meta = addTypingIndicator();
+  const startedAt = Date.now();
+  try {
+    const result = await fetch("/api/proactive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ conversation_id: conversationId, mood: moodSelect?.value || "auto" }),
+    }).then((r) => r.json());
+    await sleep(Math.max(0, HUMAN_TIMING.proactiveThinkMs - (Date.now() - startedAt)));
+    meta.remove();
+    if (!result.error && result.reply) {
+      await addBotReply(result.reply);
+      chatHistory.push({ role: "assistant", content: result.reply });
+    }
+  } catch (_) {
+    meta.remove();
+  } finally {
+    sending = false;
+    markActivity();
+    if (pendingUserMessages.length > 0) {
+      pendingTimer = setTimeout(flushPendingMessages, HUMAN_TIMING.nextBatchWindowMs);
+    }
+  }
 }
 
 function renderMemories(memories) {
@@ -165,6 +249,7 @@ function renderBehavior(behavior) {
   behaviorEl.innerHTML = `
     <section class="axis">
       <h2>\u65f6\u95f4\u884c\u4e3a</h2>
+      <p>\u4e3b\u52a8\u5f00\u8bdd\u9898\u5224\u5b9a\u9608\u503c\uff1a${topic.active_gap_threshold_minutes ?? 3} min</p>
       <p>backup \u4e3b\u52a8\u5f00\u8bdd\u9898\u7684\u6709\u6548\u4e2d\u4f4d\u95f4\u9694\uff1a${topic.median_active_gap_minutes ?? topic.median_gap_minutes ?? "-"} min</p>
       <p>\u5df2\u6392\u9664\u7761\u7720\u7a97\u53e3\uff1a${topic.sleep_window_excluded || "03:00-11:00"}</p>
       <p>\u5bf9\u53e6\u4e00\u4fa7\u6d88\u606f\u6162\u56de/\u4e0d\u56de\u6bd4\u4f8b\uff1a${response.slow_or_no_reply_ratio ?? "-"}</p>
@@ -264,13 +349,14 @@ async function loadHistory() {
 function submitMessage() {
   const text = input.value.trim();
   if (!text) return;
+  markActivity();
   input.value = "";
   resizeInput();
   addMessage("user", text);
   chatHistory.push({ role: "user", content: text });
   pendingUserMessages.push(text);
   if (pendingTimer) clearTimeout(pendingTimer);
-  pendingTimer = setTimeout(flushPendingMessages, 850);
+  pendingTimer = setTimeout(flushPendingMessages, HUMAN_TIMING.batchWindowMs);
 }
 
 async function flushPendingMessages() {
@@ -278,28 +364,34 @@ async function flushPendingMessages() {
   const batch = pendingUserMessages.splice(0);
   sending = true;
   const meta = addTypingIndicator();
+  const startedAt = Date.now();
   try {
     const result = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ conversation_id: conversationId, messages: batch, mood: moodSelect?.value || "auto" }),
     }).then((r) => r.json());
-    meta.remove();
     if (result.error) {
+      await sleep(Math.max(0, HUMAN_TIMING.minThinkMs - (Date.now() - startedAt)));
+      meta.remove();
       addMessage("bot", `${t.error}${result.error}`);
       return;
     }
     const polished = polishClientReply(result.reply, batch.join("\n"));
-    addBotReply(polished);
+    const minimumDelay = inferMinimumReplyDelay(result, polished, batch);
+    await sleep(Math.max(0, minimumDelay - (Date.now() - startedAt)));
+    meta.remove();
+    await addBotReply(polished);
     chatHistory.push({ role: "assistant", content: polished });
     renderMemories(result.memories || []);
   } catch (error) {
+    await sleep(Math.max(0, HUMAN_TIMING.minThinkMs - (Date.now() - startedAt)));
     meta.remove();
     addMessage("bot", `${t.failed}${error}`);
   } finally {
     sending = false;
     if (pendingUserMessages.length > 0) {
-      pendingTimer = setTimeout(flushPendingMessages, 350);
+      pendingTimer = setTimeout(flushPendingMessages, HUMAN_TIMING.nextBatchWindowMs);
     }
   }
 }
@@ -322,6 +414,7 @@ input.addEventListener("keydown", (event) => {
 });
 
 input.addEventListener("input", resizeInput);
+input.addEventListener("input", markActivity);
 
 clearBtn.addEventListener("click", async () => {
   chatHistory = [];
@@ -334,6 +427,7 @@ clearBtn.addEventListener("click", async () => {
     body: JSON.stringify({ conversation_id: conversationId }),
   });
   addImageMessage("bot", t.helloImage, "hello");
+  markActivity();
 });
 
 collapseLeft.addEventListener("click", () => appShell.classList.add("left-collapsed"));
@@ -349,3 +443,4 @@ renderMemories([]);
 loadHistory();
 document.querySelectorAll("img").forEach((img) => wireAvatar(img, img.alt || "?"));
 resizeInput();
+scheduleProactive();

@@ -16,10 +16,10 @@ STYLE_ROLE = "user"
 OTHER_ROLE = "target"
 FAST_REPLY_SECONDS = 10 * 60
 SLOW_REPLY_SECONDS = 60 * 60
-TOPIC_GAP_SECONDS = 45 * 60
+TOPIC_GAP_SECONDS = 3 * 60
 SLEEP_START = time(3, 0)
 SLEEP_END = time(11, 0)
-BEHAVIOR_VERSION = "0.3"
+BEHAVIOR_VERSION = "0.4"
 
 
 def load_or_build_behavior(config: AppConfig, dataset: Dataset) -> dict[str, Any]:
@@ -195,7 +195,8 @@ def analyze_behavior(dataset: Dataset) -> dict[str, Any]:
         "style_role": STYLE_ROLE,
         "style_aliases": ["backup", "ZyjT82011"],
         "topic_initiation": {
-            "definition": "backup/user message that starts after >=45 minutes of active silence; daily sleep window 03:00-11:00 is excluded from gap time",
+            "definition": "backup/user message that starts after >=3 minutes of active silence; daily sleep window 03:00-11:00 is excluded from gap time",
+            "active_gap_threshold_minutes": round(TOPIC_GAP_SECONDS / 60, 1),
             "sleep_window_excluded": "03:00-11:00",
             "count": len(initiations),
             "median_active_gap_minutes": round(median(topic_gap_values) / 60, 1) if topic_gap_values else None,
@@ -249,6 +250,7 @@ def render_behavior_md(analysis: dict[str, Any]) -> str:
         "",
         "## Topic Initiation",
         "",
+        f"- Active gap threshold: {topic.get('active_gap_threshold_minutes', 3)} minutes",
         f"- Count: {topic['count']}",
         f"- Median active gap: {topic.get('median_active_gap_minutes', topic.get('median_gap_minutes'))} minutes",
         f"- Sleep window excluded: {topic.get('sleep_window_excluded', '03:00-11:00')}",

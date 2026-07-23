@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,42 @@ def conversation_id_from(value: object) -> str:
 
 def json_bytes(payload: object) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def seeded_pick(items: list[str], seed: str) -> str:
+    if not items:
+        return "在吗"
+    digest = hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()
+    return items[int(digest[:8], 16) % len(items)]
+
+
+def proactive_reply(conversation_id: str) -> str:
+    history = STORE.load_messages(conversation_id, limit=20)
+    last_text = history[-1]["content"] if history else ""
+    candidates = [
+        "你在干嘛",
+        "醒着吗",
+        "吃饭没",
+        "困",
+        "你又不说话",
+        "我突然想起来",
+        "在吗",
+    ]
+    topic_templates = {
+        "吃饭": ["吃饭没", "你吃饭了吗"],
+        "睡觉": ["困", "你不会又睡了吧"],
+        "游戏": ["你游戏打完没", "还在打吗"],
+        "原神": ["原神打了吗"],
+        "星铁": ["星铁打了吗"],
+        "学校": ["你今天去学校吗"],
+        "动画": ["你又看什么"],
+        "歌": ["你在听歌吗"],
+    }
+    for item in FACTS.get("shared_topics") or []:
+        topic = str(item.get("value") or "")
+        candidates.extend(topic_templates.get(topic, []))
+    unique = list(dict.fromkeys(candidates))
+    return seeded_pick(unique, f"{conversation_id}|{len(history)}|{last_text}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -158,6 +195,20 @@ class Handler(BaseHTTPRequestHandler):
                 conversation_id = conversation_id_from(payload.get("conversation_id"))
                 STORE.clear_conversation(conversation_id)
                 self.send_json({"ok": True, "conversation_id": conversation_id})
+                return
+            if self.path == "/api/proactive":
+                payload = self.read_json()
+                conversation_id = conversation_id_from(payload.get("conversation_id"))
+                reply = proactive_reply(conversation_id)
+                STORE.add_message(conversation_id, "assistant", reply)
+                self.send_json(
+                    {
+                        "reply": reply,
+                        "mode": "local_proactive",
+                        "conversation_id": conversation_id,
+                        "memories": [],
+                    }
+                )
                 return
             self.send_json({"error": "not_found"}, 404)
         except Exception as exc:
