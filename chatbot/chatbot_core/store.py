@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -82,8 +83,14 @@ class ChatStore:
             return
         if "?" in text or "？" in text or any(token in text for token in ["谁", "什么人", "什么意思", "啥意思", "是不是"]):
             return
-        prefixes = ("我叫", "我是", "我喜欢", "我讨厌", "我不喜欢", "以后记住", "记住")
-        if not text.startswith(prefixes):
+        prefixes = ("我叫", "我是", "我姓", "我的名字", "我的英文名", "我英文名", "我喜欢", "我讨厌", "我不喜欢", "以后记住", "记住")
+        identity_patterns = [
+            r"我姓[\u4e00-\u9fff]",
+            r"我叫[\u4e00-\u9fffA-Za-z0-9_\-]{1,16}",
+            r"我的名字是[\u4e00-\u9fffA-Za-z0-9_\-]{1,16}",
+            r"我(?:的)?英文名(?:字)?(?:是|叫)[A-Za-z][A-Za-z0-9_\-]{1,20}",
+        ]
+        if not text.startswith(prefixes) and not any(re.search(pattern, text, flags=re.I) for pattern in identity_patterns):
             return
         existing = {row["content"] for row in self.load_memories(conversation_id, limit=100)}
         if text in existing:

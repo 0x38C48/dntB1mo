@@ -16,7 +16,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v15-context-web"
+RUNTIME_VERSION = "backup-user-style-v16-user-identity-guard"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -508,9 +508,17 @@ class ChatEngine:
         stripped = message.strip()
         if self.is_recent_chat_memory_question(stripped):
             return self.recent_chat_reply(stripped, history)
+        if self.is_identity_correction(stripped):
+            return "哦对\n我串了"
+        if self.is_user_identity_question(stripped):
+            return self.user_identity_reply(stripped, history, memories)
         if self.is_bot_identity_question(stripped):
             name = top_identity_name(self.facts)
             english = top_english_name(self.facts)
+            if self.is_bot_surname_question(stripped):
+                if name and name[0]:
+                    return f"姓{name[0]}"
+                return "姓什么没稳"
             if name and english:
                 return pick(
                     [
@@ -574,6 +582,82 @@ class ChatEngine:
             speaker = "你" if item.get("role") == "user" else "我"
             rows.append(f"{speaker}: {content[:34]}")
         return "刚才大概是：\n" + "\n".join(rows[-4:]) if rows else "刚才没啥"
+
+    def user_identity_reply(self, message: str, history: list[dict[str, Any]], memories: list[dict[str, Any]]) -> str:
+        user_name = self.extract_user_identity_from_history(history, "name") or self.extract_user_identity_from_memories(memories, "name")
+        user_surname = self.extract_user_identity_from_history(history, "surname") or self.extract_user_identity_from_memories(memories, "surname")
+        if any(token in message for token in ["姓什么", "我姓啥", "我姓什么", "我什么姓"]):
+            if user_surname:
+                return f"你姓{user_surname}"
+            return "你没说稳\n别拿我的套你"
+        if any(token in message for token in ["英文名", "english name", "English name"]):
+            english = self.extract_user_identity_from_history(history, "english")
+            if english:
+                return english
+            return "你英文名\n我没记稳"
+        if user_name:
+            return user_name
+        return "NonForgetter吧\n真名没稳"
+
+    @staticmethod
+    def extract_user_identity_from_history(history: list[dict[str, Any]], kind: str) -> str | None:
+        patterns = {
+            "surname": [
+                r"我姓([\u4e00-\u9fff])",
+                r"我.*?姓氏是([\u4e00-\u9fff])",
+                r"记住.*?我姓([\u4e00-\u9fff])",
+            ],
+            "name": [
+                r"我叫([\u4e00-\u9fffA-Za-z0-9_\-]{1,16})",
+                r"我的名字是([\u4e00-\u9fffA-Za-z0-9_\-]{1,16})",
+                r"记住.*?我叫([\u4e00-\u9fffA-Za-z0-9_\-]{1,16})",
+            ],
+            "english": [
+                r"我(?:的)?英文名(?:字)?(?:是|叫)([A-Za-z][A-Za-z0-9_\-]{1,20})",
+                r"my name is ([A-Za-z][A-Za-z0-9_\-]{1,20})",
+            ],
+        }
+        for item in reversed(history):
+            if item.get("role") != "user":
+                continue
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            for pattern in patterns.get(kind, []):
+                match = re.search(pattern, content, flags=re.I)
+                if match:
+                    value = match.group(1).strip()
+                    if value and value not in {"什么", "啥", "谁", "知道吗"}:
+                        return value
+        return None
+
+    @staticmethod
+    def extract_user_identity_from_memories(memories: list[dict[str, Any]], kind: str) -> str | None:
+        patterns = {
+            "surname": [
+                r"target\[text\]:\s*我姓([\u4e00-\u9fff])",
+                r"target\[text\]:\s*我.*?姓氏是([\u4e00-\u9fff])",
+                r"user\[text\]:\s*你姓([\u4e00-\u9fff])",
+            ],
+            "name": [
+                r"target\[text\]:\s*我叫([\u4e00-\u9fffA-Za-z0-9_\-]{1,16})",
+                r"target\[text\]:\s*我的名字是([\u4e00-\u9fffA-Za-z0-9_\-]{1,16})",
+                r"user\[text\]:\s*你叫([\u4e00-\u9fffA-Za-z0-9_\-]{1,16})",
+            ],
+            "english": [
+                r"target\[text\]:\s*我(?:的)?英文名(?:字)?(?:是|叫)([A-Za-z][A-Za-z0-9_\-]{1,20})",
+                r"user\[text\]:\s*你(?:的)?英文名(?:字)?(?:是|叫)?([A-Za-z][A-Za-z0-9_\-]{1,20})",
+            ],
+        }
+        blocked = {"林", "林薇艺", "lily", "Lily", "backup", "NonForgetter"}
+        for memory in memories:
+            text = fix_text(memory.get("text") or "")
+            for pattern in patterns.get(kind, []):
+                for match in re.finditer(pattern, text, flags=re.I):
+                    value = match.group(1).strip()
+                    if value and value not in blocked and value not in {"什么", "啥", "谁", "知道吗"}:
+                        return value
+        return None
 
     def birthday_reply(self, message: str) -> str | None:
         person = "backup"
@@ -981,6 +1065,12 @@ class ChatEngine:
         return any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "绝对没有", "有记录"])
 
     @staticmethod
+    def is_identity_correction(message: str) -> bool:
+        return any(token in message for token in ["那是你的名字", "那tm是你的名字", "那是你名字", "这是你的名字", "不是我的名字"]) or (
+            "林薇艺" in message and any(token in message for token in ["你", "不是我", "你的"])
+        )
+
+    @staticmethod
     def is_recent_chat_memory_question(message: str) -> bool:
         recent_tokens = ["刚刚", "刚才", "上一句", "前一句", "前面", "之前", "上面"]
         memory_tokens = ["说了什么", "说什么", "说过什么", "讲了什么", "聊了什么", "回答了什么", "回了什么", "你回答", "她回答"]
@@ -1067,6 +1157,8 @@ class ChatEngine:
         ][-5:]
         expansions = []
         domain = ChatEngine.classify_fact_domain(message)
+        if ChatEngine.is_user_identity_question(message):
+            expansions.extend(["NonForgetter target 我姓 我叫 我的名字 我的英文名 你姓 你叫 你名字"])
         if ChatEngine.is_bot_identity_question(message):
             expansions.extend(["名字 姓 林 薇 艺 英文名 lily 猜名字"])
         if ChatEngine.is_time_question(message):
@@ -1178,6 +1270,7 @@ class ChatEngine:
             "topic": ["原神", "星铁", "游戏", "吃饭", "睡觉", "学校", "动画", "歌", "家里"],
             "soothing": ["抱抱", "安慰", "别难受", "别生气", "早点休息", "多睡", "吃饭", "乖"],
             "memory_dispute": ["说过", "记得", "记错", "没说过", "绝对没有"],
+            "identity": ["名字", "姓", "我叫", "你叫", "英文名", "NonForgetter", "林薇艺", "lily"],
         }.get(domain, [])
 
     @staticmethod
@@ -1203,11 +1296,35 @@ class ChatEngine:
 
     @staticmethod
     def is_bot_identity_question(message: str) -> bool:
-        return any(token in message for token in ["你是谁", "你叫什么", "你叫啥", "你叫什么名字", "你名字", "英文名"])
+        if ChatEngine.is_user_identity_question(message):
+            return False
+        return any(token in message for token in ["你是谁", "你叫什么", "你叫啥", "你叫什么名字", "你名字", "你姓什么", "你姓啥", "你的英文名", "你英文名"])
+
+    @staticmethod
+    def is_bot_surname_question(message: str) -> bool:
+        return any(token in message for token in ["你姓什么", "你姓啥", "你的姓", "你什么姓"])
 
     @staticmethod
     def is_user_identity_question(message: str) -> bool:
-        return any(token in message for token in ["我是谁", "我是你的谁", "我是你的什么人", "我是什么人", "我是你什么人"])
+        return any(
+            token in message
+            for token in [
+                "我是谁",
+                "我是你的谁",
+                "我是你的什么人",
+                "我是什么人",
+                "我是你什么人",
+                "我姓什么",
+                "我姓啥",
+                "我什么姓",
+                "我叫什么",
+                "我叫啥",
+                "我的名字",
+                "我名字",
+                "我的英文名",
+                "我英文名",
+            ]
+        )
 
     @staticmethod
     def is_time_question(message: str) -> bool:
