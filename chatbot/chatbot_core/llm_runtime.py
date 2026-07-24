@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v27-frequency-weighted-closers"
+RUNTIME_VERSION = "backup-user-style-v28-clean-wake-facts"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -767,7 +767,7 @@ class ChatEngine:
             if self.is_time_question(message):
                 return pick(["你还问", "好久了", "差不多"], seed)
             if self.is_wake_time_question(message):
-                return pick(["别装早起", "真不早", "你自己想"], seed)
+                return pick(["差不多", "我记得", "大概吧"], seed)
             if self.is_birthday_question(message):
                 return pick(["别诈我", "应该吧", "我记得"], seed)
             return pick(["差不多", "我印象是", "别问了"], seed)
@@ -1235,7 +1235,7 @@ class ChatEngine:
             return pick(
                 [
                     f"大概{compact_answer}",
-                    f"{compact_answer}\n别装早起",
+                    f"{compact_answer}\n差不多",
                     f"我记得差不多\n{compact_answer}",
                 ],
                 message + compact_answer,
@@ -1737,7 +1737,7 @@ class ChatEngine:
                         samples.append((chunk_hour, line))
 
         if not samples:
-            return "准点想不起来\n但不像六点"
+            return "准点想不起来\n大概中午前后"
 
         weighted = sorted(samples, key=lambda item: item[0])
         median = weighted[len(weighted) // 2][0]
@@ -1751,7 +1751,7 @@ class ChatEngine:
             guess = "十一二点吧"
         else:
             guess = "十点多吧"
-        return f"{guess}\n不像六点"
+        return guess
 
     @staticmethod
     def is_wake_evidence_line(line: str) -> bool:
