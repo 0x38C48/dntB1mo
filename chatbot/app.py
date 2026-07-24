@@ -194,6 +194,19 @@ class Handler(BaseHTTPRequestHandler):
                     result.get("memories") or [],
                     str(result.get("emotion") or "casual"),
                 )
+                topic_update = ENGINE.topic_memory_update(message, result, context)
+                if topic_update:
+                    if topic_update.get("action") == "clear":
+                        STORE.clear_active_topic(conversation_id)
+                    elif topic_update.get("action") == "remember":
+                        STORE.remember_active_topic(
+                            conversation_id,
+                            str(topic_update.get("topic") or message),
+                            str(topic_update.get("source") or "chat"),
+                            str(topic_update.get("category") or "open"),
+                            [str(word) for word in topic_update.get("keywords") or []],
+                        )
+                    context = STORE.load_memories(conversation_id)
                 STORE.add_message(conversation_id, "assistant", result.get("reply", ""))
                 result["conversation_id"] = conversation_id
                 result["conversation_memory"] = context
@@ -219,7 +232,14 @@ class Handler(BaseHTTPRequestHandler):
                     str(payload.get("mood") or "casual"),
                 )
                 STORE.add_message(conversation_id, "assistant", reply)
-                STORE.remember_active_topic(conversation_id, reply)
+                topic = ENGINE.topic_session_from_text(reply, source="proactive")
+                STORE.remember_active_topic(
+                    conversation_id,
+                    str(topic.get("topic") or reply),
+                    "proactive",
+                    str(topic.get("category") or "open"),
+                    [str(word) for word in topic.get("keywords") or []],
+                )
                 self.send_json(
                     {
                         "reply": reply,

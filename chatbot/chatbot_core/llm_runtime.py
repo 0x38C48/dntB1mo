@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v25-emotion-topic-prompts"
+RUNTIME_VERSION = "backup-user-style-v26-topic-scoped-chat"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -233,14 +233,31 @@ class ChatEngine:
         history = self.fix_history(history or [])
         conversation_memory = conversation_memory or []
         fact_domain = self.classify_fact_domain(message)
-        retrieval_query = self.build_retrieval_query(message, history)
+        active_topic_state = self.latest_active_topic_state(conversation_memory)
+        candidate_topic_state = self.topic_session_from_text(message, source="chat")
+        active_topic_closing = active_topic_state is not None and self.should_close_active_topic(message, active_topic_state)
+        topic_scope_state = (
+            active_topic_state
+            if active_topic_state
+            and not self.should_break_active_topic(message)
+            and not active_topic_closing
+            else None
+        )
+        if (
+            active_topic_closing
+            and not self.should_break_active_topic(message)
+            and candidate_topic_state.get("category") != "open"
+            and not self.is_explicit_topic_end(message)
+        ):
+            topic_scope_state = candidate_topic_state
+        retrieval_query = self.build_retrieval_query(message, history, topic_scope_state)
         memories = self.retriever.search(retrieval_query, limit=10)
-        memories = self.rerank_memories_for_question(message, memories)
+        memories = self.rerank_memories_for_question(message, memories, topic_scope_state)
         temporary_facts = self.extract_temporary_facts(message, memories, fact_domain)
         emotion = self.resolve_emotion(message, history, mood)
         dialogue_act = self.classify_dialogue_act(message)
         web_results = search_web(message, limit=4) if self.should_web_lookup(message) else []
-        active_topic_blocked = self.should_break_active_topic(message)
+        active_topic_blocked = self.should_break_active_topic(message) or active_topic_closing
         prompt_conversation_memory = (
             self.without_active_topic(conversation_memory) if active_topic_blocked else conversation_memory
         )
@@ -323,6 +340,40 @@ class ChatEngine:
                 "web_results": web_results,
             }
 
+        close_topic_reply = (
+            self.close_topic_reply(message, active_topic_state)
+            if active_topic_closing
+            and (candidate_topic_state.get("category") == "open" or self.is_explicit_topic_end(message))
+            and not self.should_break_active_topic(message)
+            else None
+        )
+        if close_topic_reply:
+            return {
+                "reply": close_topic_reply,
+                "mode": f"{self.mode}_topic_close_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
+        new_topic_reply = (
+            self.new_topic_seed_reply(message, topic_scope_state)
+            if topic_scope_state
+            and candidate_topic_state.get("category") != "open"
+            and str(topic_scope_state.get("topic") or "") == str(candidate_topic_state.get("topic") or "")
+            else None
+        )
+        if new_topic_reply:
+            return {
+                "reply": new_topic_reply,
+                "mode": f"{self.mode}_topic_seed_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
         if self.should_route_locally(message):
             return {
                 "reply": compact_reply(self.local_reply(message, memories, conversation_memory, emotion), DEFAULT_MAX_REPLY_CHARS),
@@ -333,7 +384,18 @@ class ChatEngine:
                 "web_results": web_results,
             }
 
-        prompt = self.build_prompt(message, history[-48:], memories, prompt_conversation_memory, emotion, fact_domain, temporary_facts, web_results, dialogue_act)
+        prompt = self.build_prompt(
+            message,
+            history[-48:],
+            memories,
+            prompt_conversation_memory,
+            emotion,
+            fact_domain,
+            temporary_facts,
+            web_results,
+            dialogue_act,
+            topic_scope_state,
+        )
         if self.config.sophnet_api_key:
             try:
                 text = self.call_sophnet_api(prompt)
@@ -396,6 +458,7 @@ class ChatEngine:
         temporary_facts: dict[str, Any],
         web_results: list[dict[str, str]] | None = None,
         dialogue_act: str = "open_chat",
+        active_topic_scope: dict[str, Any] | None = None,
     ) -> str:
         axes = self.persona.get("five_axes", {})
         persona_brief = {
@@ -424,6 +487,7 @@ class ChatEngine:
             "style_dna": STYLE_DNA,
             "emotion_state": emotion,
             "emotion_prompt_profile": self.emotion_prompt_profile(emotion),
+            "active_topic_scope": active_topic_scope,
             "fact_domain": fact_domain,
             "dialogue_act": dialogue_act,
             "identity_and_timeline_facts": self.public_facts(),
@@ -448,6 +512,7 @@ class ChatEngine:
                 "事实只点到即可，比如“林薇艺\\nlily”或“2024-10-13”。",
                 "优先保留个人语气：吐槽、反问、停顿、轻微敷衍可以有，别太端着。",
                 "emotion_prompt_profile 是当前情绪下的说话方式约束；它影响语气、气泡数、是否追问，但不能覆盖事实证据。",
+                "如果 active_topic_scope 不为空，说明当前日常话题尚未结束；除非用户明显换题/结束/问事实插问，否则思考方向和检索记忆都围绕该话题。",
                 "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
@@ -631,6 +696,8 @@ class ChatEngine:
         text = fix_text(reply).strip()
         if not text or self.allows_long_reply(message):
             return text
+        if "topic_close" in mode:
+            return text
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
@@ -731,6 +798,36 @@ class ChatEngine:
                 return True
         return False
 
+    def topic_memory_update(
+        self,
+        message: str,
+        result: dict[str, Any],
+        conversation_memory: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        mode = str(result.get("mode") or "")
+        current = self.latest_active_topic_state(conversation_memory)
+        if current and self.should_close_active_topic(message, current):
+            new_state = self.topic_session_from_text(message, source="chat")
+            if new_state.get("category") != "open" and not self.is_explicit_topic_end(message):
+                return {"action": "remember", **new_state}
+            return {"action": "clear"}
+
+        if any(token in mode for token in ["fact", "evidence", "memory", "web", "repair"]):
+            return None
+
+        if "topic_continuation" in mode and current:
+            updated = dict(current)
+            updated["action"] = "remember"
+            updated["source"] = "continuation"
+            updated["turns"] = int(updated.get("turns") or 0) + 1
+            return updated
+
+        candidate = self.topic_session_from_text(message, source="chat")
+        if candidate.get("category") != "open":
+            candidate["action"] = "remember"
+            return candidate
+        return None
+
     def conversation_repair_reply(self, message: str, history: list[dict[str, Any]]) -> str | None:
         if not self.is_conversation_repair_question(message):
             return None
@@ -752,8 +849,9 @@ class ChatEngine:
         history: list[dict[str, Any]],
         conversation_memory: list[dict[str, Any]],
     ) -> str | None:
-        topic = self.latest_active_topic(conversation_memory)
-        if not topic or self.should_break_active_topic(message):
+        topic_state = self.latest_active_topic_state(conversation_memory)
+        topic = str(topic_state.get("topic") or "") if topic_state else ""
+        if not topic or self.should_break_active_topic(message) or self.should_close_active_topic(message, topic_state or {}):
             return None
         if not self.last_assistant_matches_topic(history, topic):
             return None
@@ -771,8 +869,8 @@ class ChatEngine:
     def without_active_topic(conversation_memory: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [item for item in conversation_memory if item.get("kind") != "active_topic"]
 
-    @staticmethod
-    def latest_active_topic(conversation_memory: list[dict[str, Any]]) -> str | None:
+    @classmethod
+    def latest_active_topic_state(cls, conversation_memory: list[dict[str, Any]]) -> dict[str, Any] | None:
         now = time.time()
         for item in conversation_memory:
             if item.get("kind") != "active_topic":
@@ -789,15 +887,62 @@ class ChatEngine:
                 continue
             try:
                 payload = json.loads(content)
-                topic = str(payload.get("topic", "")).strip()
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                topic = content
-            if topic:
-                return topic[:80]
+                if not isinstance(payload, dict):
+                    payload = {"topic": content}
+            except (json.JSONDecodeError, TypeError):
+                payload = {"topic": content}
+
+            topic = str(payload.get("topic") or "").strip()
+            if not topic:
+                continue
+            if payload.get("status") == "closed":
+                continue
+
+            category = str(payload.get("category") or "").strip()
+            keywords = [str(word).strip() for word in payload.get("keywords") or [] if str(word).strip()]
+            inferred = cls.topic_session_from_text(topic, source=str(payload.get("source") or "memory"))
+            if not category or category == "open":
+                category = inferred["category"]
+            if not keywords:
+                keywords = inferred["keywords"]
+            return {
+                "topic": topic[:80],
+                "category": category or "open",
+                "keywords": keywords[:12],
+                "source": str(payload.get("source") or "memory"),
+                "turns": int(payload.get("turns") or 0),
+                "created_at": created_at,
+            }
         return None
 
     @staticmethod
+    def latest_active_topic(conversation_memory: list[dict[str, Any]]) -> str | None:
+        state = ChatEngine.latest_active_topic_state(conversation_memory)
+        return str(state.get("topic") or "") if state else None
+
+    @staticmethod
+    def topic_session_from_text(text: str, source: str = "chat") -> dict[str, Any]:
+        raw = fix_text(text or "").strip()
+        first_line = next((line.strip() for line in raw.splitlines() if line.strip()), raw)
+        probes = {
+            "food": ["吃饭", "吃", "饭", "饿", "外卖", "食堂", "喝", "咖啡"],
+            "game": ["游戏", "打完", "原神", "星铁", "崩铁", "绝区零", "zzz", "鸣潮", "steam", "瓦", "玩"],
+            "presence": ["在吗", "在不在", "干嘛", "不说话", "没声", "醒着"],
+            "sleep": ["困", "睡", "醒", "晚安", "安安", "起床", "睡觉"],
+            "music": ["听歌", "歌", "循环"],
+            "school": ["学校", "上课", "考试", "作业", "迟到"],
+            "media": ["动画", "番", "看什么", "视频", "电影"],
+            "care": ["难受", "烦", "哭", "抱抱", "生气", "别难受"],
+        }
+        for category, words in probes.items():
+            hits = [word for word in words if word.lower() in first_line.lower()]
+            if hits:
+                return {"topic": first_line[:80], "category": category, "keywords": list(dict.fromkeys(hits + words[:5])), "source": source}
+        return {"topic": first_line[:80], "category": "open", "keywords": [], "source": source}
+
+    @staticmethod
     def last_assistant_matches_topic(history: list[dict[str, Any]], topic: str) -> bool:
+        first_topic = next((line.strip() for line in topic.splitlines() if line.strip()), topic.strip())
         assistants = [
             str(item.get("content", "")).strip()
             for item in history[-8:]
@@ -807,7 +952,7 @@ class ChatEngine:
             return False
         recent = assistants[-4:]
         return any(
-            topic in item or item in topic or SequenceMatcher(None, item, topic).ratio() >= 0.55
+            first_topic in item or item in first_topic or SequenceMatcher(None, item, first_topic).ratio() >= 0.55
             for item in recent
         )
 
@@ -832,6 +977,46 @@ class ChatEngine:
             self.is_memory_dispute_question,
         ]
         return any(checker(message) for checker in checkers)
+
+    def should_close_active_topic(self, message: str, topic_state: dict[str, Any]) -> bool:
+        stripped = fix_text(message).strip()
+        if not stripped:
+            return False
+        if self.is_explicit_topic_end(stripped):
+            return True
+        if self.is_topic_prompt_request(stripped) or self.is_minimal_topic_ack(stripped):
+            return False
+        current_category = str(topic_state.get("category") or "open")
+        new_state = self.topic_session_from_text(stripped)
+        new_category = str(new_state.get("category") or "open")
+        if new_category != "open" and current_category != "open" and new_category != current_category:
+            return True
+        if len(stripped) > 40 and new_category == "open" and not self.topic_message_matches(stripped, topic_state):
+            return True
+        return False
+
+    @staticmethod
+    def is_explicit_topic_end(message: str) -> bool:
+        return any(token in fix_text(message).strip() for token in ["算了", "不聊", "别聊", "换个", "换话题", "先这样", "没事了", "睡了", "晚安", "安安", "拜拜", "88"])
+
+    @staticmethod
+    def topic_message_matches(message: str, topic_state: dict[str, Any]) -> bool:
+        haystack = fix_text(message).lower()
+        keywords = [str(word).lower() for word in topic_state.get("keywords") or [] if str(word).strip()]
+        if any(word and word in haystack for word in keywords):
+            return True
+        category = str(topic_state.get("category") or "")
+        category_cues = {
+            "food": ["吃", "饭", "饿", "喝", "外卖"],
+            "game": ["玩", "打", "游戏", "原神", "星铁", "绝区零"],
+            "presence": ["在", "干嘛", "说话", "没声"],
+            "sleep": ["困", "睡", "醒", "晚安"],
+            "music": ["歌", "听"],
+            "school": ["学校", "上课", "考试"],
+            "media": ["看", "动画", "番", "视频"],
+            "care": ["难受", "烦", "哭", "抱"],
+        }
+        return any(cue in haystack for cue in category_cues.get(category, []))
 
     @staticmethod
     def is_minimal_topic_ack(message: str) -> bool:
@@ -926,6 +1111,45 @@ class ChatEngine:
             return pick(["去不去啊", "几点去", "别迟到"], seed)
 
         return pick(["然后呢", "你继续", "说啊", "嗯哼"], seed)
+
+    def new_topic_seed_reply(self, message: str, topic_state: dict[str, Any] | None) -> str | None:
+        if not topic_state:
+            return None
+        category = str(topic_state.get("category") or "open")
+        seed = message + "|" + category
+        if category == "food":
+            if any(token in message for token in ["吃什么", "吃啥"]):
+                return pick(["你想吃啥", "随便吃点", "别问我啊"], seed)
+            return pick(["你吃没", "又饿了啊", "吃饭啊"], seed)
+        if category == "game":
+            if any(token in message for token in ["打完", "还在"]):
+                return pick(["你还在打啊", "打完没", "又打游戏"], seed)
+            return pick(["玩啥呢", "你又开了", "什么游戏"], seed)
+        if category == "sleep":
+            return pick(["又困了啊", "那去睡", "别硬撑"], seed)
+        if category == "presence":
+            return pick(["在", "干嘛", "你说"], seed)
+        if category == "music":
+            return pick(["听啥", "又循环了", "好听吗"], seed)
+        if category == "school":
+            return pick(["要去吗", "几点去", "别迟到"], seed)
+        if category == "media":
+            return pick(["看啥", "又看什么", "好看吗"], seed)
+        if category == "care":
+            return pick(["怎么了", "别硬撑", "我听着"], seed)
+        return None
+
+    @staticmethod
+    def close_topic_reply(message: str, topic_state: dict[str, Any] | None) -> str:
+        category = str((topic_state or {}).get("category") or "open")
+        seed = message + "|" + category
+        if any(token in message for token in ["睡了", "晚安", "安安"]):
+            return pick(["那睡吧", "晚安", "别熬了"], seed)
+        if any(token in message for token in ["换个", "换话题"]):
+            return pick(["行\n换啥", "那换", "你说"], seed)
+        if any(token in message for token in ["算了", "不聊", "别聊", "先这样"]):
+            return pick(["行吧", "那先这样", "好"], seed)
+        return pick(["行", "好吧", "那咋了"], seed)
 
     @staticmethod
     def preference_statement_reply(message: str) -> str:
@@ -1312,7 +1536,16 @@ class ChatEngine:
             return "像二游\n具体想不起来"
         return "具体想不起来\n别让我硬猜"
 
-    def rerank_memories_for_question(self, message: str, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def rerank_memories_for_question(
+        self,
+        message: str,
+        memories: list[dict[str, Any]],
+        topic_state: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        if topic_state and not self.should_break_active_topic(message):
+            scoped = self.scope_memories_to_topic(memories, topic_state)
+            if scoped:
+                memories = scoped
         if not self.is_play_preference_question(message):
             return memories
         person = "NonForgetter" if any(token in message for token in ["我喜欢", "我爱玩", "我玩什么"]) else "backup"
@@ -1322,6 +1555,36 @@ class ChatEngine:
         ]
         scored.sort(key=lambda item: (item[0], item[1], -item[2]), reverse=True)
         return [memory for _, _, _, memory in scored]
+
+    @staticmethod
+    def scope_memories_to_topic(memories: list[dict[str, Any]], topic_state: dict[str, Any]) -> list[dict[str, Any]]:
+        keywords = [str(word).strip().lower() for word in topic_state.get("keywords") or [] if str(word).strip()]
+        category = str(topic_state.get("category") or "")
+        if not keywords and category == "open":
+            return memories
+        category_bonus = {
+            "food": ["吃", "饭", "饿", "喝", "外卖", "食堂"],
+            "game": ["玩", "打", "游戏", "原神", "星铁", "绝区零", "崩铁", "steam"],
+            "presence": ["在吗", "干嘛", "说话", "没声"],
+            "sleep": ["困", "睡", "醒", "晚安", "起床"],
+            "music": ["歌", "听歌", "循环"],
+            "school": ["学校", "上课", "考试", "迟到"],
+            "media": ["看", "动画", "番", "视频"],
+            "care": ["难受", "烦", "哭", "抱抱", "生气"],
+        }.get(category, [])
+        probes = list(dict.fromkeys([*keywords, *category_bonus]))
+        if not probes:
+            return memories
+        scored: list[tuple[int, float, int, dict[str, Any]]] = []
+        for index, memory in enumerate(memories):
+            text = fix_text(memory.get("text") or "").lower()
+            hit_count = sum(1 for probe in probes if probe and probe.lower() in text)
+            scored.append((hit_count, float(memory.get("score") or 0), -index, memory))
+        ranked = sorted(scored, key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        hits = [memory for hit, _, _, memory in ranked if hit > 0]
+        if len(hits) >= 3:
+            return hits[:10]
+        return [memory for _, _, _, memory in ranked]
 
     @staticmethod
     def play_memory_score(memory: dict[str, Any], person: str) -> int:
@@ -1873,7 +2136,11 @@ class ChatEngine:
         return any(token in message for token in ["详细", "讲清楚", "展开", "分析", "解释一下", "说清楚"])
 
     @staticmethod
-    def build_retrieval_query(message: str, history: list[dict[str, Any]]) -> str:
+    def build_retrieval_query(
+        message: str,
+        history: list[dict[str, Any]],
+        topic_state: dict[str, Any] | None = None,
+    ) -> str:
         recent_user_text = [
             str(item.get("content", ""))
             for item in history[-10:]
@@ -1881,6 +2148,17 @@ class ChatEngine:
         ][-5:]
         expansions = []
         domain = ChatEngine.classify_fact_domain(message)
+        if topic_state:
+            topic_text = str(topic_state.get("topic") or "")
+            topic_category = str(topic_state.get("category") or "")
+            topic_keywords = " ".join(str(word) for word in topic_state.get("keywords") or [])
+            expansions.extend(
+                [
+                    f"当前话题 {topic_text}",
+                    f"话题类别 {topic_category}",
+                    f"话题关键词 {topic_keywords}",
+                ]
+            )
         if ChatEngine.is_user_identity_question(message):
             expansions.extend(["NonForgetter target 我姓 我叫 我的名字 我的英文名 你姓 你叫 你名字"])
         if ChatEngine.is_bot_identity_question(message):

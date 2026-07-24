@@ -102,17 +102,38 @@ class ChatStore:
                 (conversation_id, "user_fact", text, time.time()),
             )
 
-    def remember_active_topic(self, conversation_id: str, topic: str) -> None:
+    def remember_active_topic(
+        self,
+        conversation_id: str,
+        topic: str,
+        source: str = "proactive",
+        category: str | None = None,
+        keywords: list[str] | None = None,
+    ) -> None:
         text = (topic or "").strip()
         if not text:
             return
-        payload = json.dumps({"topic": text[:80], "source": "proactive"}, ensure_ascii=False)
+        payload = json.dumps(
+            {
+                "topic": text[:80],
+                "source": source,
+                "category": category or "open",
+                "keywords": (keywords or [])[:12],
+                "status": "open",
+                "turns": 0,
+            },
+            ensure_ascii=False,
+        )
         with self.connect() as conn:
             conn.execute("DELETE FROM memories WHERE conversation_id = ? AND kind = ?", (conversation_id, "active_topic"))
             conn.execute(
                 "INSERT INTO memories(conversation_id, kind, content, created_at) VALUES (?, ?, ?, ?)",
                 (conversation_id, "active_topic", payload, time.time()),
             )
+
+    def clear_active_topic(self, conversation_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM memories WHERE conversation_id = ? AND kind = ?", (conversation_id, "active_topic"))
 
     def load_memories(self, conversation_id: str, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
