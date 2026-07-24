@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v28-clean-wake-facts"
+RUNTIME_VERSION = "backup-user-style-v29-proactive-topic-tails"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -734,12 +734,19 @@ class ChatEngine:
             base = 0.22
         elif any(token in mode for token in ["fact", "evidence", "memory"]):
             base = 0.34
+        elif "local_proactive" in mode:
+            topic_state = self.topic_session_from_text("\n".join(lines), source="proactive")
+            if topic_state.get("category") == "sleep":
+                base = 0.22
+            else:
+                base = 0.44
         elif any(token in mode for token in ["topic_continuation", "chat_act", "repair"]):
             base = 0.56
         else:
             base = CONSECUTIVE_STYLE_PROFILE["open_chat_multi_ratio"]
 
-        if len(text) <= 3 or self.is_minimal_topic_ack(text):
+        proactive_sleep = "local_proactive" in mode and self.topic_session_from_text("\n".join(lines), source="proactive").get("category") == "sleep"
+        if (len(text) <= 3 or self.is_minimal_topic_ack(text)) and not proactive_sleep:
             base = max(base, CONSECUTIVE_STYLE_PROFILE["micro_opening_multi_ratio"])
         if "\n" in message:
             base += 0.06
@@ -761,6 +768,8 @@ class ChatEngine:
         emotion: str,
     ) -> str:
         seed = message + "|" + reply + "|" + mode + "|" + emotion
+        if "local_proactive" in mode:
+            return self.proactive_consecutive_tail(reply, seed)
         if any(token in mode for token in ["fact", "evidence", "memory"]):
             if self.is_bot_identity_question(message) or self.is_user_identity_question(message):
                 return pick(["又来", "别装", "你猜"], seed)
@@ -784,6 +793,30 @@ class ChatEngine:
             return pick(["然后呢", "说啊", "干嘛"], seed)
 
         return pick(["然后呢", "你继续", "说啊", "嗯哼", "干嘛"], seed)
+
+    def proactive_consecutive_tail(self, reply: str, seed: str) -> str:
+        topic_state = self.topic_session_from_text(reply, source="proactive")
+        category = str(topic_state.get("category") or "open")
+        first_line = next((line.strip() for line in fix_text(reply).splitlines() if line.strip()), "")
+        if category == "sleep":
+            if any(token in first_line for token in ["醒", "醒着"]):
+                return pick(["还醒着吗", "别装睡", "在不在"], seed)
+            return pick(["你又不睡", "别熬了", "去睡啊"], seed)
+        if category == "food":
+            return pick(["别又不吃", "吃了没", "快去吃"], seed)
+        if category == "game":
+            return pick(["还在打吗", "打完没", "别打太晚"], seed)
+        if category == "presence":
+            return pick(["在不在", "干嘛去了", "说话"], seed)
+        if category == "music":
+            return pick(["听啥", "又循环了", "好听吗"], seed)
+        if category == "school":
+            return pick(["几点去", "别迟到", "去不去"], seed)
+        if category == "media":
+            return pick(["看啥", "好看吗", "又看什么"], seed)
+        if category == "care":
+            return pick(["怎么了", "别硬撑", "还难受吗"], seed)
+        return pick(["干嘛", "在不在", "你说"], seed)
 
     @staticmethod
     def is_near_duplicate_line(line: str, existing: list[str]) -> bool:
