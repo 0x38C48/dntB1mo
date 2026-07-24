@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v29-proactive-topic-tails"
+RUNTIME_VERSION = "backup-user-style-v30-presence-activity-logic"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -36,7 +36,7 @@ EMOTION_PROMPT_PROFILES = {
         "record_summary": "记录里最多见，短句为主，中位长度约4字；常见是接一句、轻轻吐槽或抛回去。",
         "style": "不热情解释，不端着；可以短促、随手、像刚看到消息。",
         "avoid": "不要写成长句安慰或报告。",
-        "bubbles": "1-2条，第二条可以是干嘛/然后呢/你说。",
+        "bubbles": "1-2条，第二条可以是干嘛/你说/咋了。",
     },
     "playful": {
         "record_summary": "主要是6、666、哈、笑死、绷不住这类短促接梗，平均也很短。",
@@ -104,7 +104,21 @@ STYLE_DNA = {
     "limits": "这是基于聊天记录的风格模拟，不是本人；记录没有证据时可以不确定，但不能硬编。",
 }
 
-OVERUSED_STYLE_LINES = {"哼", "嗯", "嗯嗯", "好", "啊", "?", "？", "...", "。。。"}
+OVERUSED_STYLE_LINES = {
+    "哼",
+    "嗯",
+    "嗯嗯",
+    "好",
+    "啊",
+    "?",
+    "？",
+    "...",
+    "。。。",
+    "你继续",
+    "然后呢",
+    "你知道个吊",
+    "不是吃饭",
+}
 
 
 def pick(items: list[str], seed: str) -> str:
@@ -513,6 +527,7 @@ class ChatEngine:
                 "优先保留个人语气：吐槽、反问、停顿、轻微敷衍可以有，别太端着。",
                 "emotion_prompt_profile 是当前情绪下的说话方式约束；它影响语气、气泡数、是否追问，但不能覆盖事实证据。",
                 "如果 active_topic_scope 不为空，说明当前日常话题尚未结束；除非用户明显换题/结束/问事实插问，否则思考方向和检索记忆都围绕该话题。",
+                "如果刚才问“在吗/醒着吗/干嘛去了”，用户回“吃饭/洗澡/上课/打游戏”等行为，这是在回答去向，先顺着接，不要否定。",
                 "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
@@ -525,6 +540,7 @@ class ChatEngine:
                 "遇到多行 user_message，代表 NonForgetter 连续发了多条消息，要整体理解后回复。",
                 "如果 dialogue_act 是 casual_statement 或 preference_statement，先接住对方这句话，不要像问卷一样回答事实标签。",
                 "如果 dialogue_act 是 repair_request，用“不是/算了/哎呀/你别管/那咋了”这类含糊转移，不要说“我换个说法/我重说/我接歪了/我生成错了”。",
+                "不要用“你继续”当兜底；“然后呢”也少用，除非真的在追问故事后续。",
                 "遇到“刚刚/刚才/上一句/之前我说了什么/你回答了什么”，必须优先看 recent_dialogue_state，用“你刚说/我刚回”回答，不要说“看到记录”。",
                 "遇到谐音梗、网络梗、拼音缩写时按语境接住情绪和笑点，不要机械解释。",
                 "如果 web_search.result_count > 0，说明已经联网；解释梗时优先综合 web_search，证据弱就说像是/可能是。",
@@ -651,7 +667,7 @@ class ChatEngine:
             return pick(candidates + ["好嘛", "那先这样", "我听着", "慢慢说"], stripped)
         if emotion == "excited":
             return pick(candidates + ["我靠", "真的假的", "快说", "有点意思"], stripped)
-        return pick(candidates + ["6", "我靠", "你继续", "有点意思", "先听你说"], stripped + emotion)
+        return pick(candidates + ["6", "我靠", "有点意思", "你说", "说啥"], stripped + emotion)
 
     def polish_model_reply(
         self,
@@ -781,6 +797,8 @@ class ChatEngine:
                 return pick(["别诈我", "应该吧", "我记得"], seed)
             return pick(["差不多", "我印象是", "别问了"], seed)
 
+        if self.is_activity_status_answer(message):
+            return self.activity_followup_tail(message, seed)
         if self.is_question_like(message):
             return pick(["你说呢", "怎么了", "又问"], seed)
         if emotion == "annoyed":
@@ -790,9 +808,25 @@ class ChatEngine:
         if emotion == "playful":
             return pick(["笑死", "又乐", "6"], seed)
         if len(message.strip()) <= 3:
-            return pick(["然后呢", "说啊", "干嘛"], seed)
+            return pick(["说啊", "干嘛", "咋了"], seed)
 
-        return pick(["然后呢", "你继续", "说啊", "嗯哼", "干嘛"], seed)
+        return pick(["说啊", "嗯哼", "干嘛", "咋了"], seed)
+
+    @staticmethod
+    def activity_followup_tail(message: str, seed: str) -> str:
+        if any(token in message for token in ["吃饭", "吃完", "吃了", "干饭"]):
+            return pick(["吃啥", "吃饱没", "这么快"], seed)
+        if any(token in message for token in ["洗澡", "洗漱"]):
+            return pick(["洗完了？", "难怪", "哦"], seed)
+        if any(token in message for token in ["上课", "下课", "考试", "写作业", "复习"]):
+            return pick(["忙完没", "累不累", "那行"], seed)
+        if any(token in message for token in ["打游戏", "玩游戏", "原神", "星铁", "绝区零"]):
+            return pick(["打完没", "玩啥", "又玩"], seed)
+        if any(token in message for token in ["看番", "看视频"]):
+            return pick(["看啥", "好看吗", "又看"], seed)
+        if any(token in message for token in ["听歌"]):
+            return pick(["听啥", "好听吗", "又循环了？"], seed)
+        return pick(["哦", "那行", "难怪"], seed)
 
     def proactive_consecutive_tail(self, reply: str, seed: str) -> str:
         topic_state = self.topic_session_from_text(reply, source="proactive")
@@ -872,6 +906,11 @@ class ChatEngine:
             ),
             "",
         )
+        recent_text = "\n".join(str(item.get("content", "")).strip() for item in history[-8:] if str(item.get("content", "")).strip())
+        if last_assistant and any(token in last_assistant for token in ["不是吃饭", "你知道个吊", "然后呢", "你继续"]):
+            if any(token in recent_text for token in ["醒着吗", "干嘛去了", "在吗", "没声"]):
+                return pick(["不是那个意思\n我问你刚干嘛去了", "哎呀\n问你刚去哪了", "算了\n你吃你的"], message + last_assistant)
+            return pick(["不是那个意思", "哎呀\n算了", "当我没说"], message + last_assistant)
         if last_assistant:
             return pick(["不是", "哎呀\n算了", "你别管", "好吧\n当我没说", "那咋了", "没事"], message + last_assistant)
         return pick(["什么", "啊？", "不是"], message)
@@ -894,6 +933,8 @@ class ChatEngine:
             return None
         if self.is_topic_prompt_request(stripped):
             return self.expand_active_topic(topic, stripped)
+        if self.is_waiting_for_user_topic(topic_state, topic) and self.is_activity_status_answer(stripped):
+            return self.activity_status_reply(topic, stripped)
         if self.is_minimal_topic_ack(stripped) or self.is_topic_continuation_like(stripped):
             return self.continue_active_topic(topic, stripped)
         return None
@@ -1020,6 +1061,8 @@ class ChatEngine:
         if self.is_topic_prompt_request(stripped) or self.is_minimal_topic_ack(stripped):
             return False
         current_category = str(topic_state.get("category") or "open")
+        if self.is_waiting_for_user_topic(topic_state, str(topic_state.get("topic") or "")) and self.is_activity_status_answer(stripped):
+            return False
         new_state = self.topic_session_from_text(stripped)
         new_category = str(new_state.get("category") or "open")
         if new_category != "open" and current_category != "open" and new_category != current_category:
@@ -1042,14 +1085,90 @@ class ChatEngine:
         category_cues = {
             "food": ["吃", "饭", "饿", "喝", "外卖"],
             "game": ["玩", "打", "游戏", "原神", "星铁", "绝区零"],
-            "presence": ["在", "干嘛", "说话", "没声"],
-            "sleep": ["困", "睡", "醒", "晚安"],
+            "presence": ["在", "干嘛", "说话", "没声", "吃饭", "洗澡", "上课", "打游戏"],
+            "sleep": ["困", "睡", "醒", "晚安", "吃饭", "洗澡", "上课"],
             "music": ["歌", "听"],
             "school": ["学校", "上课", "考试"],
             "media": ["看", "动画", "番", "视频"],
             "care": ["难受", "烦", "哭", "抱"],
         }
         return any(cue in haystack for cue in category_cues.get(category, []))
+
+    @staticmethod
+    def is_waiting_for_user_topic(topic_state: dict[str, Any] | None, topic: str = "") -> bool:
+        category = str((topic_state or {}).get("category") or "")
+        text = fix_text(topic or str((topic_state or {}).get("topic") or "")).strip()
+        if category == "presence":
+            return True
+        return any(token in text for token in ["在吗", "在不在", "干嘛", "不说话", "没声", "醒着"])
+
+    @staticmethod
+    def is_activity_status_answer(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        if not stripped or len(stripped) > 24:
+            return False
+        if ChatEngine.is_question_like(stripped) or ChatEngine.is_explicit_topic_end(stripped):
+            return False
+        activity_tokens = [
+            "吃饭",
+            "吃完",
+            "吃了",
+            "干饭",
+            "洗澡",
+            "洗漱",
+            "睡觉",
+            "睡了",
+            "刚醒",
+            "起床",
+            "上课",
+            "下课",
+            "考试",
+            "写作业",
+            "打游戏",
+            "玩游戏",
+            "原神",
+            "星铁",
+            "绝区零",
+            "看番",
+            "看视频",
+            "听歌",
+            "出门",
+            "回家",
+            "到家",
+            "在路上",
+            "忙",
+            "复习",
+        ]
+        if stripped in {"吃饭", "洗澡", "睡觉", "上课", "打游戏", "看番", "听歌", "忙"}:
+            return True
+        return any(token in stripped for token in activity_tokens) and any(
+            token in stripped for token in ["我", "刚", "在", "去", "了", "完", "前面", "刚才"]
+        )
+
+    @staticmethod
+    def activity_status_reply(topic: str, message: str) -> str:
+        seed = fix_text(topic) + "|" + fix_text(message)
+        if any(token in message for token in ["吃饭", "干饭"]):
+            if any(token in message for token in ["前面", "刚才", "去了"]):
+                return pick(["哦\n吃饭去了啊", "难怪没声", "那刚吃完啊"], seed)
+            return pick(["吃啥", "那吃呗", "别又不吃"], seed)
+        if any(token in message for token in ["吃完", "吃了"]):
+            return pick(["吃完了啊", "那行", "吃的啥"], seed)
+        if any(token in message for token in ["洗澡", "洗漱"]):
+            return pick(["哦\n洗澡去了啊", "难怪", "那洗完了？"], seed)
+        if any(token in message for token in ["上课", "下课", "考试", "写作业", "复习"]):
+            return pick(["哦\n上课去了啊", "难怪没声", "那你忙完没"], seed)
+        if any(token in message for token in ["打游戏", "玩游戏", "原神", "星铁", "绝区零"]):
+            return pick(["又打游戏", "打完没", "玩啥呢"], seed)
+        if any(token in message for token in ["看番", "看视频"]):
+            return pick(["看啥", "好看吗", "难怪没声"], seed)
+        if any(token in message for token in ["听歌"]):
+            return pick(["听啥", "又循环了？", "难怪"], seed)
+        if any(token in message for token in ["出门", "回家", "到家", "在路上"]):
+            return pick(["哦", "到哪了", "那小心点"], seed)
+        if "忙" in message:
+            return pick(["忙啥", "难怪没声", "那你忙"], seed)
+        return pick(["哦", "难怪", "那行"], seed)
 
     @staticmethod
     def is_minimal_topic_ack(message: str) -> bool:
@@ -1110,7 +1229,10 @@ class ChatEngine:
 
     def continue_active_topic(self, topic: str, message: str) -> str:
         first_line = next((line.strip() for line in topic.splitlines() if line.strip()), topic.strip())
+        topic_text = fix_text(topic)
         seed = first_line + "|" + message
+        if self.is_waiting_for_user_topic({"topic": topic_text}, topic_text) and self.is_activity_status_answer(message):
+            return self.activity_status_reply(topic_text, message)
         if any(token in first_line for token in ["吃饭", "吃了吗", "饿"]):
             if any(token in message for token in ["什么", "啥"]):
                 return pick(["你想吃啥", "随便吃点", "别问我啊"], seed)
@@ -1123,12 +1245,12 @@ class ChatEngine:
                 return pick(["还在啊", "打完没", "玩啥呢"], seed)
             if any(token in message for token in ["什么", "啥"]):
                 return pick(["你不是会玩", "又问我", "你想玩啥"], seed)
-            return pick(["那你继续", "别打太晚", "行吧"], seed)
+            return pick(["那你玩", "别打太晚", "行吧"], seed)
 
-        if any(token in first_line for token in ["在吗", "干嘛", "不说话"]):
+        if any(token in topic_text for token in ["在吗", "干嘛", "不说话", "没声", "醒着"]):
             if "在" in message:
                 return pick(["那你干嘛呢", "在就说话", "嗯哼"], seed)
-            return pick(["然后呢", "你继续", "说啊"], seed)
+            return pick(["说啊", "干嘛去了", "咋了"], seed)
 
         if any(token in first_line for token in ["困", "睡"]):
             if any(token in message for token in ["困", "睡", "累"]):
@@ -1143,7 +1265,7 @@ class ChatEngine:
         if any(token in first_line for token in ["学校", "去学校"]):
             return pick(["去不去啊", "几点去", "别迟到"], seed)
 
-        return pick(["然后呢", "你继续", "说啊", "嗯哼"], seed)
+        return pick(["说啊", "嗯哼", "咋了", "干嘛"], seed)
 
     def new_topic_seed_reply(self, message: str, topic_state: dict[str, Any] | None) -> str | None:
         if not topic_state:
@@ -1190,7 +1312,7 @@ class ChatEngine:
             return pick(["那你玩啥", "玩啥啊", "那还挺好"], message)
         if any(token in message for token in ["喜欢吃", "爱吃", "想吃"]):
             return pick(["吃啥", "那吃呗", "你又饿了"], message)
-        return pick(["嗯哼", "然后呢", "你继续"], message)
+        return pick(["嗯哼", "你说", "咋了"], message)
 
     @staticmethod
     def food_chat_reply(message: str) -> str | None:
@@ -2461,6 +2583,8 @@ class ChatEngine:
 
     @staticmethod
     def is_habit_question(message: str) -> bool:
+        if not ChatEngine.is_question_like(message):
+            return False
         return any(token in message for token in ["平时", "习惯", "作息", "几点睡", "吃饭", "上课", "考试", "家里", "身体", "不舒服"])
 
     @staticmethod
