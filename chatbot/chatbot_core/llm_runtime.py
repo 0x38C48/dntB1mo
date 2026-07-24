@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v26-topic-scoped-chat"
+RUNTIME_VERSION = "backup-user-style-v27-frequency-weighted-closers"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -696,7 +696,7 @@ class ChatEngine:
         text = fix_text(reply).strip()
         if not text or self.allows_long_reply(message):
             return text
-        if "topic_close" in mode:
+        if "topic_close" in mode or "topic_seed" in mode:
             return text
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -1123,7 +1123,7 @@ class ChatEngine:
             return pick(["你吃没", "又饿了啊", "吃饭啊"], seed)
         if category == "game":
             if any(token in message for token in ["打完", "还在"]):
-                return pick(["你还在打啊", "打完没", "又打游戏"], seed)
+                return pick(["还没啊", "没打完", "你又催"], seed)
             return pick(["玩啥呢", "你又开了", "什么游戏"], seed)
         if category == "sleep":
             return pick(["又困了啊", "那去睡", "别硬撑"], seed)
@@ -1144,7 +1144,7 @@ class ChatEngine:
         category = str((topic_state or {}).get("category") or "open")
         seed = message + "|" + category
         if any(token in message for token in ["睡了", "晚安", "安安"]):
-            return pick(["那睡吧", "晚安", "别熬了"], seed)
+            return pick(["安安", "晚安安", "那睡吧\n安安", "别熬了\n安安"], seed)
         if any(token in message for token in ["换个", "换话题"]):
             return pick(["行\n换啥", "那换", "你说"], seed)
         if any(token in message for token in ["算了", "不聊", "别聊", "先这样"]):
