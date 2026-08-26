@@ -21,6 +21,7 @@ chatbot/server-*.log
 chatbot/server-*.err.log
 chatbot/chat_memory.db
 chatbot/chat_memory.db-*
+chatbot/eval_reports/
 
 # Python / editor cache
 __pycache__/

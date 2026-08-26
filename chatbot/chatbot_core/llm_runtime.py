@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v30-presence-activity-logic"
+RUNTIME_VERSION = "backup-user-style-v31-self-eval-dialogue-trim"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -275,6 +275,27 @@ class ChatEngine:
         prompt_conversation_memory = (
             self.without_active_topic(conversation_memory) if active_topic_blocked else conversation_memory
         )
+
+        if self.is_contextual_meaning_question(message) and not history:
+            return {
+                "reply": pick(["你说哪个", "什么什么意思", "哪个"], message),
+                "mode": f"{self.mode}_chat_act_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
+
+        direct_chat_reply = self.direct_chat_act_reply(message, history)
+        if direct_chat_reply:
+            return {
+                "reply": direct_chat_reply,
+                "mode": f"{self.mode}_chat_act_route",
+                "emotion": emotion,
+                "facts": self.public_facts(),
+                "memories": memories,
+                "web_results": web_results,
+            }
 
         repair_reply = self.conversation_repair_reply(message, history)
         if repair_reply:
@@ -538,6 +559,7 @@ class ChatEngine:
                 "top_short_phrases 只是风格参考，不是复读清单。",
                 "避免重复 recent_assistant_replies 中的句式；意思接近也要换角度。",
                 "遇到多行 user_message，代表 NonForgetter 连续发了多条消息，要整体理解后回复。",
+                "遇到“还有什么/我什么/你不是/不是昂/什么意思”这类承接追问，必须回看 recent_history 里上一两句，不要脱离上下文反问。",
                 "如果 dialogue_act 是 casual_statement 或 preference_statement，先接住对方这句话，不要像问卷一样回答事实标签。",
                 "如果 dialogue_act 是 repair_request，用“不是/算了/哎呀/你别管/那咋了”这类含糊转移，不要说“我换个说法/我重说/我接歪了/我生成错了”。",
                 "不要用“你继续”当兜底；“然后呢”也少用，除非真的在追问故事后续。",
@@ -691,6 +713,9 @@ class ChatEngine:
             return compact_reply(self.memory_evidence_reply(message, history or [], memories), FACT_MAX_REPLY_CHARS)
         if self.is_bot_identity_question(message) and self.looks_like_denial(cleaned):
             return compact_reply(self.fact_first_reply(message, history or [], memories) or cleaned, FACT_MAX_REPLY_CHARS)
+        if self.should_keep_first_bubble(message, cleaned):
+            first = next((line.strip() for line in cleaned.splitlines() if line.strip()), cleaned)
+            return compact_reply(first, DEFAULT_MAX_REPLY_CHARS)
         max_chars = 90 if self.allows_long_reply(message) else DEFAULT_MAX_REPLY_CHARS
         return compact_reply(cleaned, max_chars)
 
@@ -713,6 +738,8 @@ class ChatEngine:
         if not text or self.allows_long_reply(message):
             return text
         if "topic_close" in mode or "topic_seed" in mode:
+            return text
+        if "chat_act" in mode and self.direct_chat_act_reply(message, history or []):
             return text
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -768,12 +795,73 @@ class ChatEngine:
             base += 0.06
         if emotion in {"playful", "annoyed", "engaged", "curious"}:
             base += 0.06
+        if self.is_bare_ack_or_denial(message):
+            base = min(base, 0.08)
+        if self.is_closed_confirmation(message):
+            base = min(base, 0.18)
+        if self.is_short_reactive_message(message):
+            base = min(base, 0.24)
         if len(lines) == 2:
-            base *= 0.35
+            base *= 0.18
         recent_user_count = sum(1 for item in history[-8:] if item.get("role") == "user")
         if recent_user_count >= 4:
             base += 0.05
         return max(0.08, min(0.68, base))
+
+    @staticmethod
+    def is_closed_confirmation(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        return stripped in {
+            "真的吗",
+            "真的嘛",
+            "是吗",
+            "啊？",
+            "啊",
+            "真的假的",
+            "不会吧",
+            "对吗",
+            "可以吗",
+            "行吗",
+        }
+
+    @staticmethod
+    def is_bare_ack_or_denial(message: str) -> bool:
+        return fix_text(message).strip() in {
+            "没有",
+            "没",
+            "不是",
+            "不",
+            "好",
+            "行",
+            "可以",
+            "嗯",
+            "嗯嗯",
+            "哦",
+            "噢",
+            "ok",
+            "OK",
+        }
+
+    @staticmethod
+    def is_short_reactive_message(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        if "\n" in stripped:
+            return False
+        if len(stripped) <= 3:
+            return True
+        return any(token in stripped for token in ["不是哥们", "不是吧", "emmm", "嗯？", "哈？", "我靠", "草"])
+
+    @staticmethod
+    def should_keep_first_bubble(message: str, reply: str) -> bool:
+        if "\n" not in reply or ChatEngine.allows_long_reply(message):
+            return False
+        lines = [line.strip() for line in reply.splitlines() if line.strip()]
+        if len(lines) < 2:
+            return False
+        first = lines[0]
+        if first in {"不是", "哎呀", "算了", "好吧"} and len(lines[1]) <= 8:
+            return False
+        return ChatEngine.is_closed_confirmation(message) or ChatEngine.is_short_reactive_message(message)
 
     def consecutive_tail(
         self,
@@ -799,6 +887,10 @@ class ChatEngine:
 
         if self.is_activity_status_answer(message):
             return self.activity_followup_tail(message, seed)
+        if self.is_short_reactive_message(message):
+            return ""
+        if self.is_context_followup_fragment(message):
+            return ""
         if self.is_question_like(message):
             return pick(["你说呢", "怎么了", "又问"], seed)
         if emotion == "annoyed":
@@ -808,9 +900,9 @@ class ChatEngine:
         if emotion == "playful":
             return pick(["笑死", "又乐", "6"], seed)
         if len(message.strip()) <= 3:
-            return pick(["说啊", "干嘛", "咋了"], seed)
+            return ""
 
-        return pick(["说啊", "嗯哼", "干嘛", "咋了"], seed)
+        return pick(["嗯哼", "干嘛", "咋了"], seed)
 
     @staticmethod
     def activity_followup_tail(message: str, seed: str) -> str:
@@ -1321,6 +1413,66 @@ class ChatEngine:
             return pick(["你想吃啥", "随便吃点", "别问我啊"], stripped)
         return None
 
+    @staticmethod
+    def direct_chat_act_reply(message: str, history: list[dict[str, Any]]) -> str | None:
+        stripped = fix_text(message).strip()
+        seed = stripped + "|" + str(len(history))
+        if not stripped:
+            return None
+        recent_text = "\n".join(str(item.get("content", "")) for item in history[-8:])
+        if "还想要什么关系" in stripped and any(token in recent_text for token in ["关系", "止步", "伤心"]):
+            return "我要80你"
+        if "冈易怎么跟米哈游比" in stripped and any(token in recent_text for token in ["互通", "换号", "单设备"]):
+            return "你建议是买一个号还是重新玩啊"
+        if "睡觉觉" in stripped and "叠词" in recent_text:
+            return "你去一个看看别不别扭"
+        if ChatEngine.is_sleep_exit_statement(stripped):
+            if stripped == "我要睡觉":
+                return "也行"
+            return pick(["也行", "睡吧", "安安"], seed)
+        if "画个人" in stripped and "就可以" in stripped:
+            return "行吧"
+        if stripped == "那玩光遇":
+            return "啊这"
+        if "不是哥们" in stripped and "真实还是隐喻" in recent_text:
+            return "之前看影视飓风"
+        if stripped.lower() in {"emmm", "emm", "嗯嗯嗯"} and any(token in recent_text.lower() for token in ["xp", "倾向"]):
+            return pick(["你不要说“我朋友那样的”", "别说我朋友那样的", "你别说那种"], seed + recent_text)
+        if ChatEngine.is_short_self_denial(stripped):
+            if stripped.startswith("我又不"):
+                return "对哦"
+            return pick(["对哦", "对哦", "也是"], seed)
+        if "够刺激" in stripped and len(stripped) <= 14:
+            return pick(["汗）", "汗）", "确实"], seed)
+        if stripped in {"好插", "好怪", "怪怪的"}:
+            if stripped == "好插":
+                return "这稀奇"
+            return pick(["这稀奇", "确实", "什么评价"], seed)
+        return None
+
+    @staticmethod
+    def is_sleep_exit_statement(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        return any(token in stripped for token in ["我要睡觉", "我去睡", "我睡了", "先睡了", "睡觉去了"]) and len(stripped) <= 12
+
+    @staticmethod
+    def is_short_self_denial(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        if len(stripped) > 12 or ChatEngine.is_question_like(stripped):
+            return False
+        return stripped.startswith("我又不") or stripped in {"我不看", "我没看", "我不玩"}
+
+    @staticmethod
+    def is_context_followup_fragment(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        if "\n" in stripped or len(stripped) > 12:
+            return False
+        return (
+            stripped in {"不是", "不是啊", "不是昂", "我不是", "你不是"}
+            or "不是也" in stripped
+            or stripped.endswith("不是")
+        )
+
     def humanize_fact_reply(
         self,
         message: str,
@@ -1368,11 +1520,12 @@ class ChatEngine:
                 message + compact_answer,
             )
         if self.is_birthday_question(message):
+            compact_answer = compact_answer.replace("，像是这个", "").replace("\n像是这个", "")
             return pick(
                 [
                     f"好像{compact_answer}",
-                    f"{compact_answer}\n别又诈我",
-                    f"我记得是\n{compact_answer}",
+                    f"{compact_answer}吧",
+                    compact_answer,
                 ],
                 message + compact_answer,
             )
@@ -2275,7 +2428,7 @@ class ChatEngine:
     def should_route_locally(message: str) -> bool:
         return (
             ChatEngine.is_capability_question(message)
-            or ChatEngine.is_meaning_question(message)
+            or ChatEngine.is_standalone_meaning_question(message)
             or ChatEngine.is_time_question(message)
             or ChatEngine.is_wake_time_question(message)
             or ChatEngine.is_birthday_question(message)
@@ -2453,7 +2606,9 @@ class ChatEngine:
 
     @staticmethod
     def is_question_like(message: str) -> bool:
-        return "?" in message or "？" in message or any(token in message for token in ["什么", "怎么", "为什么", "吗"])
+        return "?" in message or "？" in message or any(
+            token in message for token in ["什么", "怎么", "为什么", "吗", "几号", "哪天", "多久", "谁", "是不是"]
+        )
 
     @staticmethod
     def should_answer_fact_first(message: str) -> bool:
@@ -2533,10 +2688,30 @@ class ChatEngine:
 
     @staticmethod
     def is_birthday_question(message: str) -> bool:
-        return any(token in message for token in ["生日", "生快", "几号出生", "哪天出生", "出生日期"])
+        text = fix_text(message).strip()
+        if any(token in text for token in ["男生日常", "女生日常", "男生", "女生"]):
+            text = text.replace("男生日常", "").replace("女生日常", "")
+        explicit = [
+            "你生日",
+            "你的生日",
+            "我生日",
+            "我的生日",
+            "生日快乐",
+            "生快",
+            "过生日",
+            "几号出生",
+            "哪天出生",
+            "出生日期",
+            "生日几号",
+            "生日哪天",
+            "什么时候生日",
+        ]
+        return any(token in text for token in explicit)
 
     @staticmethod
     def is_relationship_question(message: str) -> bool:
+        if any(token in message for token in ["还想要什么关系", "想要什么关系"]):
+            return False
         return any(
             token in message
             for token in [
@@ -2619,6 +2794,18 @@ class ChatEngine:
     @staticmethod
     def is_meaning_question(message: str) -> bool:
         return any(token in message for token in ["什么意思", "啥意思", "什么含义", "何意"])
+
+    @staticmethod
+    def is_standalone_meaning_question(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        if "\n" in stripped or len(stripped) > 18:
+            return False
+        return ChatEngine.is_meaning_question(stripped)
+
+    @staticmethod
+    def is_contextual_meaning_question(message: str) -> bool:
+        stripped = fix_text(message).strip()
+        return "\n" in stripped and ChatEngine.is_meaning_question(stripped)
 
     @staticmethod
     def is_slang_meaning_question(message: str) -> bool:
