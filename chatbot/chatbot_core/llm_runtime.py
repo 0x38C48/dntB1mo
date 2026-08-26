@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v34-memory-balance"
+RUNTIME_VERSION = "backup-user-style-v35-care-phrase-context"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -131,6 +131,8 @@ OVERUSED_STYLE_LINES = {
     "然后呢",
     "你知道个吊",
     "不是吃饭",
+    "慢慢来",
+    "慢慢说",
 }
 
 GENERIC_TONE_MISFIRES = {
@@ -142,6 +144,8 @@ GENERIC_TONE_MISFIRES = {
     "行吧",
     "对啊",
     "嗯哼",
+    "慢慢来",
+    "慢慢说",
 }
 
 
@@ -525,7 +529,7 @@ class ChatEngine:
         persona_brief = {
             key: {
                 "label": value.get("label"),
-                "summary": fix_text(value.get("summary", "")),
+                "summary": self.sanitize_persona_summary(value.get("summary", "")),
                 "guardrails": value.get("guardrails", []),
                 "limits": value.get("limits", []),
                 "top_short_phrases": self.filter_style_phrases(value.get("top_short_phrases", []))[:10],
@@ -580,6 +584,7 @@ class ChatEngine:
                 "tone_context 是从 backup 历史记录总结出的当前语气画像；要把 tone_context.record_style、recent_message_blend、matched_style_samples 拼在一起理解，再生成回复。",
                 "tone_context.current_turn_reading 如果指出上一句/当前话题的承接关系，优先按这个关系接话，不要跳成问答题。",
                 "如果 tone_context.selected_tone 是 playful/sleepy/annoyed/soft，回复必须体现对应状态；不要只回“不是/好吧/没有/不知道”这类泛短句。",
+                "不要突然用“慢慢来/慢慢说”当安慰模板；游戏、困、累的场景更适合“别累着/别硬撑/累就歇会”。",
                 "memory_reference_context 必须看，但按 weight 使用：strong 才能当事实锚点，weak 只能当语气/联想背景。",
                 "普通闲聊时，当前 user_message 和 recent_history 权重大于历史记忆；不要把旧记录里的事件当成此刻正在发生。",
                 "只有 identity/birthday/time/relationship/preference/habit/nickname/topic/soothing/memory_dispute 这类事实域，才把 retrieved_memories 当强证据。",
@@ -722,7 +727,7 @@ class ChatEngine:
         if emotion == "annoyed":
             return pick(candidates + ["行行行", "你又来了", "我服了", "别太离谱"], stripped)
         if emotion == "soft":
-            return pick(candidates + ["好嘛", "那先这样", "我听着", "慢慢说"], stripped)
+            return pick(candidates + ["好嘛", "那先这样", "我听着", "别硬撑"], stripped)
         if emotion == "excited":
             return pick(candidates + ["我靠", "真的假的", "快说", "有点意思"], stripped)
         return pick(candidates + ["6", "我靠", "有点意思", "你说", "说啥"], stripped + emotion)
@@ -749,6 +754,9 @@ class ChatEngine:
             return compact_reply(self.memory_evidence_reply(message, history or [], memories), FACT_MAX_REPLY_CHARS)
         if self.is_bot_identity_question(message) and self.looks_like_denial(cleaned):
             return compact_reply(self.fact_first_reply(message, history or [], memories) or cleaned, FACT_MAX_REPLY_CHARS)
+        awkward_care_repair = self.repair_awkward_care_phrase(cleaned, message, history or [])
+        if awkward_care_repair:
+            return awkward_care_repair
         tone_repair = self.repair_tone_misfire(cleaned, message, memories, emotion)
         if tone_repair:
             return tone_repair
@@ -780,6 +788,40 @@ class ChatEngine:
         if emotion == "engaged" and "\n" in message:
             return pick(["我看完了", "你这几句", "等下", "那咋了"], message + reply)
         return None
+
+    @staticmethod
+    def repair_awkward_care_phrase(
+        reply: str,
+        message: str,
+        history: list[dict[str, Any]],
+    ) -> str | None:
+        if "慢慢来" not in reply and "慢慢说" not in reply:
+            return None
+        recent = "\n".join(
+            [message]
+            + [
+                str(item.get("content", ""))
+                for item in history[-6:]
+                if str(item.get("content", "")).strip()
+            ]
+        )
+        replacement = "不急"
+        if any(token in recent for token in ["累", "困", "熬", "硬撑"]):
+            replacement = "你别累着就行"
+        elif any(token in recent for token in ["玩", "打游戏", "原神", "星铁", "绝区零", "渊"]):
+            replacement = "你别累着就行"
+        elif any(token in recent for token in ["难受", "烦", "emo", "哭"]):
+            replacement = "我听着"
+        lines = [line.strip() for line in reply.splitlines() if line.strip()]
+        fixed_lines = [
+            replacement if line in {"慢慢来", "慢慢说"} else line.replace("慢慢来", replacement).replace("慢慢说", replacement)
+            for line in lines
+        ]
+        deduped: list[str] = []
+        for line in fixed_lines:
+            if line and line not in deduped:
+                deduped.append(line)
+        return compact_reply("\n".join(deduped), DEFAULT_MAX_REPLY_CHARS)
 
     def polish_web_reply(self, text: str, message: str, web_results: list[dict[str, str]]) -> str:
         cleaned = fix_text(text).strip().strip("“”\"")
@@ -958,7 +1000,9 @@ class ChatEngine:
         if emotion == "annoyed":
             return pick(["服了", "别太离谱", "你又来"], seed)
         if emotion == "soft":
-            return pick(["先这样", "慢慢来", "我听着"], seed)
+            if any(token in message for token in ["累", "困", "玩", "打游戏", "原神", "星铁", "绝区零"]):
+                return pick(["别累着", "累就歇会", "别硬撑"], seed)
+            return pick(["先这样", "我听着", "别硬撑"], seed)
         if emotion == "playful":
             return pick(["笑死", "又乐", "6"], seed)
         if len(message.strip()) <= 3:
@@ -2279,6 +2323,12 @@ class ChatEngine:
             {**item, "content": fix_text(item.get("content", ""))}
             for item in history
         ]
+
+    @staticmethod
+    def sanitize_persona_summary(value: object) -> str:
+        text = fix_text(str(value or ""))
+        text = text.replace("、慢慢", "").replace("慢慢、", "").replace("慢慢", "")
+        return re.sub(r"\s+", " ", text).strip()
 
     @staticmethod
     def recent_dialogue_state(history: list[dict[str, Any]]) -> dict[str, Any]:
