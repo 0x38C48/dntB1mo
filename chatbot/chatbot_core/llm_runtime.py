@@ -17,7 +17,7 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v31-self-eval-dialogue-trim"
+RUNTIME_VERSION = "backup-user-style-v33-tone-guard"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
@@ -118,6 +118,17 @@ OVERUSED_STYLE_LINES = {
     "然后呢",
     "你知道个吊",
     "不是吃饭",
+}
+
+GENERIC_TONE_MISFIRES = {
+    "不是",
+    "没有",
+    "不知道",
+    "好吧",
+    "好嘛",
+    "行吧",
+    "对啊",
+    "嗯哼",
 }
 
 
@@ -224,11 +235,13 @@ class ChatEngine:
         persona: dict[str, Any],
         retriever: Retriever,
         facts: dict[str, Any] | None = None,
+        tone_profiles: dict[str, Any] | None = None,
     ):
         self.config = config
         self.persona = persona
         self.retriever = retriever
         self.facts = facts or {}
+        self.tone_profiles = tone_profiles or {}
         if config.sophnet_api_key:
             self.mode = "sophnet_chat_completions"
         elif config.openai_api_key:
@@ -512,6 +525,7 @@ class ChatEngine:
             for item in history[-12:]
             if item.get("role") == "assistant" and item.get("content")
         ][-6:]
+        tone_context = self.tone_prompt_context(emotion, message, history, memories)
         payload = {
             "task": "生成自然中文即时聊天回复。主要模拟 backup/user 侧风格，但不要机械复读。",
             "nuwa_protocol": NUWA_PROTOCOL,
@@ -522,6 +536,7 @@ class ChatEngine:
             "style_dna": STYLE_DNA,
             "emotion_state": emotion,
             "emotion_prompt_profile": self.emotion_prompt_profile(emotion),
+            "tone_context": tone_context,
             "active_topic_scope": active_topic_scope,
             "fact_domain": fact_domain,
             "dialogue_act": dialogue_act,
@@ -547,6 +562,9 @@ class ChatEngine:
                 "事实只点到即可，比如“林薇艺\\nlily”或“2024-10-13”。",
                 "优先保留个人语气：吐槽、反问、停顿、轻微敷衍可以有，别太端着。",
                 "emotion_prompt_profile 是当前情绪下的说话方式约束；它影响语气、气泡数、是否追问，但不能覆盖事实证据。",
+                "tone_context 是从 backup 历史记录总结出的当前语气画像；要把 tone_context.record_style、recent_message_blend、matched_style_samples 拼在一起理解，再生成回复。",
+                "tone_context.current_turn_reading 如果指出上一句/当前话题的承接关系，优先按这个关系接话，不要跳成问答题。",
+                "如果 tone_context.selected_tone 是 playful/sleepy/annoyed/soft，回复必须体现对应状态；不要只回“不是/好吧/没有/不知道”这类泛短句。",
                 "如果 active_topic_scope 不为空，说明当前日常话题尚未结束；除非用户明显换题/结束/问事实插问，否则思考方向和检索记忆都围绕该话题。",
                 "如果刚才问“在吗/醒着吗/干嘛去了”，用户回“吃饭/洗澡/上课/打游戏”等行为，这是在回答去向，先顺着接，不要否定。",
                 "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
@@ -713,11 +731,37 @@ class ChatEngine:
             return compact_reply(self.memory_evidence_reply(message, history or [], memories), FACT_MAX_REPLY_CHARS)
         if self.is_bot_identity_question(message) and self.looks_like_denial(cleaned):
             return compact_reply(self.fact_first_reply(message, history or [], memories) or cleaned, FACT_MAX_REPLY_CHARS)
+        tone_repair = self.repair_tone_misfire(cleaned, message, memories, emotion)
+        if tone_repair:
+            return tone_repair
         if self.should_keep_first_bubble(message, cleaned):
             first = next((line.strip() for line in cleaned.splitlines() if line.strip()), cleaned)
             return compact_reply(first, DEFAULT_MAX_REPLY_CHARS)
         max_chars = 90 if self.allows_long_reply(message) else DEFAULT_MAX_REPLY_CHARS
         return compact_reply(cleaned, max_chars)
+
+    def repair_tone_misfire(
+        self,
+        reply: str,
+        message: str,
+        memories: list[dict[str, Any]],
+        emotion: str,
+    ) -> str | None:
+        compact = re.sub(r"\s+", "", reply)
+        if compact not in GENERIC_TONE_MISFIRES:
+            return None
+        text = message.lower()
+        if emotion == "playful" or any(token in text for token in ["笑死", "哈哈", "乐子", "乐乐", "绷", "xswl"]):
+            return pick(["笑死", "绷不住了", "什么东西啊", "你又开始了"], message + reply)
+        if emotion == "sleepy" or any(token in text for token in ["困", "睡", "安安", "晚安"]):
+            return pick(["睡吧", "安安", "困就睡", "别硬撑"], message + reply)
+        if emotion == "annoyed":
+            return pick(["我服了", "别太离谱", "又来了", "算了"], message + reply)
+        if emotion == "soft":
+            return pick(["摸摸", "没事", "别难受", "先缓缓"], message + reply)
+        if emotion == "engaged" and "\n" in message:
+            return pick(["我看完了", "你这几句", "等下", "那咋了"], message + reply)
+        return None
 
     def polish_web_reply(self, text: str, message: str, web_results: list[dict[str, str]]) -> str:
         cleaned = fix_text(text).strip().strip("“”\"")
@@ -2225,30 +2269,159 @@ class ChatEngine:
             "rule": "这是当前不断线聊天的短期记忆。用户追问刚才/之前说了什么时，直接引用这里，不要去猜。",
         }
 
-    @staticmethod
-    def emotion_prompt_profile(emotion: str) -> dict[str, str]:
-        return EMOTION_PROMPT_PROFILES.get(emotion) or EMOTION_PROMPT_PROFILES["casual"]
+    def emotion_prompt_profile(self, emotion: str) -> dict[str, Any]:
+        profile = ((self.tone_profiles.get("tones") or {}).get(emotion) or {}).copy()
+        fallback = EMOTION_PROMPT_PROFILES.get(emotion) or EMOTION_PROMPT_PROFILES["casual"]
+        if not profile:
+            return fallback
+        compact_profile = {
+            "record_summary": profile.get("record_summary") or fallback.get("record_summary"),
+            "style": profile.get("style") or fallback.get("style"),
+            "avoid": profile.get("avoid") or fallback.get("avoid"),
+            "bubbles": profile.get("bubbles") or fallback.get("bubbles"),
+            "stats": profile.get("stats", {}),
+            "top_phrases": self.filter_style_phrases(profile.get("top_phrases", []))[:8],
+            "common_endings": profile.get("common_endings", [])[:5],
+        }
+        return compact_profile
 
-    @staticmethod
-    def resolve_emotion(message: str, history: list[dict[str, Any]], mood: str) -> str:
+    def tone_prompt_context(
+        self,
+        emotion: str,
+        message: str,
+        history: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        recent_blend = [
+            {
+                "role": str(item.get("role", "")),
+                "content": fix_text(str(item.get("content", ""))).strip()[:80],
+            }
+            for item in history[-10:]
+            if str(item.get("content", "")).strip()
+        ]
+        record_profile = self.emotion_prompt_profile(emotion)
+        matched_samples = self.tone_matched_samples(emotion, memories)
+        return {
+            "selected_tone": emotion,
+            "trigger_reason": self.emotion_trigger_reason(message, history, emotion),
+            "current_turn_reading": self.current_turn_reading(message, history),
+            "record_style": record_profile,
+            "recent_message_blend": recent_blend,
+            "matched_style_samples": matched_samples,
+            "consecutive_style": self.tone_profiles.get("consecutive_style", {}),
+            "composition_rules": [
+                "用 recent_message_blend 判断这句是在接上一句、追问、纠错还是开新话题。",
+                "用 record_style 决定短句长度、反问方式和气泡数。",
+                "用 matched_style_samples 借语气，不要照抄整句。",
+                "事实回答要先像人一样想一下、含糊一点点，再给事实；别像填空题。",
+            ],
+        }
+
+    def tone_matched_samples(self, emotion: str, memories: list[dict[str, Any]]) -> list[str]:
+        record_profile = (self.tone_profiles.get("tones") or {}).get(emotion) or {}
+        samples = self.filter_style_phrases(record_profile.get("examples", []))[:6]
+        memory_samples = self.extract_style_lines(memories)[:8]
+        result: list[str] = []
+        seen = set()
+        for line in [*samples, *memory_samples]:
+            if line in seen:
+                continue
+            seen.add(line)
+            result.append(line)
+            if len(result) >= 10:
+                break
+        return result
+
+    def resolve_emotion(self, message: str, history: list[dict[str, Any]], mood: str) -> str:
         if mood and mood != "auto":
             return mood
-        text = message.lower()
-        if any(token in text for token in ["困", "睡", "晚安", "安安"]):
-            return "sleepy"
-        if any(token in text for token in ["别", "服了", "逆天", "无语"]):
-            return "annoyed"
-        if any(token in text for token in ["烦", "难受", "emo", "哭", "累"]):
-            return "soft"
-        if any(token in text for token in ["？", "?", "什么意思", "怎么", "为什么"]):
-            return "curious"
-        if any(token in text for token in ["笑死", "哈哈", "乐子", "绷", "6"]):
-            return "playful"
-        if any(token in text for token in ["我靠", "卧槽", "真的假的", "好耶", "哇", "牛"]):
-            return "excited"
-        if history and len([h for h in history[-8:] if h.get("role") == "user"]) >= 4:
+        text = fix_text(message).lower()
+        recent_user_count = len([h for h in history[-8:] if h.get("role") == "user"])
+        if "\n" in message or recent_user_count >= 4:
             return "engaged"
+        scores = self.score_tones(text)
+        if any(token in text for token in ["难受", "emo", "哭", "委屈", "破防"]):
+            scores["soft"] = scores.get("soft", 0) + 3
+        if any(token in text for token in ["困", "睡", "晚安", "安安"]):
+            scores["sleepy"] = scores.get("sleepy", 0) + 4
+        if any(token in text for token in ["笑死", "哈哈", "乐子", "绷", "xswl"]):
+            scores["playful"] = scores.get("playful", 0) + 4
+        if any(token in text for token in ["别", "服了", "逆天", "无语", "烦"]):
+            scores["annoyed"] = scores.get("annoyed", 0) + 3
+        if any(token in text for token in ["我靠", "卧槽", "真的假的", "好耶", "哇", "牛"]):
+            scores["excited"] = scores.get("excited", 0) + 3
+        if any(token in text for token in ["？", "?", "什么意思", "怎么", "为什么", "啥"]):
+            scores["curious"] = scores.get("curious", 0) + 2
+        if scores:
+            priority = {"sleepy": 7, "soft": 6, "annoyed": 5, "playful": 4, "excited": 3, "curious": 2, "engaged": 1}
+            return max(scores.items(), key=lambda item: (item[1], priority.get(item[0], 0)))[0]
         return "casual"
+
+    def score_tones(self, text: str) -> dict[str, int]:
+        tones = self.tone_profiles.get("tones") or {}
+        scores: dict[str, int] = {}
+        for tone, profile in tones.items():
+            cues = [str(cue).lower() for cue in profile.get("cues", []) if str(cue)]
+            hit = sum(1 for cue in cues if cue and cue in text)
+            if hit:
+                scores[tone] = hit
+        return scores
+
+    @staticmethod
+    def emotion_trigger_reason(message: str, history: list[dict[str, Any]], emotion: str) -> str:
+        text = message.strip()
+        if "\n" in text:
+            return "NonForgetter 连续发了多句，需要合并理解。"
+        if emotion == "sleepy":
+            return "当前消息命中困/睡/安安一类低能量线索。"
+        if emotion == "playful":
+            return "当前消息像接梗或玩笑。"
+        if emotion == "annoyed":
+            return "当前消息带否定、嫌弃或边界感。"
+        if emotion == "soft":
+            return "当前消息有低落、难受或需要安抚的线索。"
+        if emotion == "curious":
+            return "当前消息是疑问或承接追问。"
+        if emotion == "excited":
+            return "当前消息有惊讶/兴奋线索。"
+        if len([h for h in history[-8:] if h.get("role") == "user"]) >= 4:
+            return "最近 NonForgetter 连续发言，需要整体接住。"
+        return "普通闲聊，按历史短句风格接话。"
+
+    @staticmethod
+    def current_turn_reading(message: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+        previous_assistant = next(
+            (
+                fix_text(str(item.get("content", ""))).strip()
+                for item in reversed(history)
+                if item.get("role") == "assistant" and str(item.get("content", "")).strip()
+            ),
+            "",
+        )
+        previous_user = next(
+            (
+                fix_text(str(item.get("content", ""))).strip()
+                for item in reversed(history)
+                if item.get("role") == "user" and str(item.get("content", "")).strip()
+            ),
+            "",
+        )
+        relation = "new_or_loose"
+        if len(message.strip().splitlines()) >= 2:
+            relation = "multi_message_batch"
+        elif any(token in message for token in ["什么意思", "啥意思", "你在说什么", "什么东西", "这啥"]):
+            relation = "repair_or_meaning_followup"
+        elif any(token in message for token in ["然后", "那", "所以", "怎么了", "咋了"]):
+            relation = "continuation"
+        elif previous_assistant and len(message.strip()) <= 4:
+            relation = "short_reply_to_previous_assistant"
+        return {
+            "relation": relation,
+            "previous_assistant": previous_assistant[:80],
+            "previous_user": previous_user[:80],
+            "instruction": "先根据 relation 判断这句是不是在接上一轮；如果是，就围绕上一轮回答，不要另起炉灶。",
+        }
 
     def softened_question_reply(self, message: str, memories: list[dict[str, Any]]) -> str:
         digest = hashlib.sha256(message.encode("utf-8")).hexdigest()

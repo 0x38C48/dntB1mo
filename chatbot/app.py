@@ -15,6 +15,7 @@ from chatbot_core.llm_runtime import RUNTIME_VERSION, ChatEngine
 from chatbot_core.persona_runtime import load_or_build_persona
 from chatbot_core.retrieval import Retriever
 from chatbot_core.store import ChatStore
+from chatbot_core.tone_runtime import load_or_build_tone_profiles
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,8 +26,9 @@ DATASET = Dataset(CONFIG.prepared_dir)
 PERSONA = load_or_build_persona(CONFIG, DATASET)
 BEHAVIOR = load_or_build_behavior(CONFIG, DATASET)
 FACTS = load_or_build_facts(CONFIG, DATASET)
+TONE_PROFILES = load_or_build_tone_profiles(CONFIG, DATASET)
 RETRIEVER = Retriever(DATASET.load_chunks())
-ENGINE = ChatEngine(CONFIG, PERSONA, RETRIEVER, FACTS)
+ENGINE = ChatEngine(CONFIG, PERSONA, RETRIEVER, FACTS, TONE_PROFILES)
 STORE = ChatStore(CONFIG.db_path)
 
 
@@ -136,6 +138,8 @@ class Handler(BaseHTTPRequestHandler):
                     "date_range": DATASET.manifest.get("date_range"),
                     "behavior_version": BEHAVIOR.get("version"),
                     "facts_version": FACTS.get("version"),
+                    "tone_version": TONE_PROFILES.get("version"),
+                    "tone_count": len(TONE_PROFILES.get("tones") or {}),
                     "database": str(CONFIG.db_path),
                 }
             )
