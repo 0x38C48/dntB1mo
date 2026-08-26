@@ -17,12 +17,25 @@ from .textfix import fix_text
 from .web_search import search_web, web_context_for_prompt
 
 
-RUNTIME_VERSION = "backup-user-style-v33-tone-guard"
+RUNTIME_VERSION = "backup-user-style-v34-memory-balance"
 
 DEFAULT_MAX_REPLY_CHARS = 28
 FACT_MAX_REPLY_CHARS = 18
 FACT_STYLE_MAX_REPLY_CHARS = 32
 BUBBLE_MAX_CHARS = 12
+STRONG_MEMORY_DOMAINS = {
+    "identity",
+    "birthday",
+    "relationship",
+    "emotion",
+    "preference",
+    "habit",
+    "nickname",
+    "topic",
+    "soothing",
+    "time",
+    "memory_dispute",
+}
 
 CONSECUTIVE_STYLE_PROFILE = {
     "observed_multi_run_ratio": 0.487,
@@ -525,7 +538,8 @@ class ChatEngine:
             for item in history[-12:]
             if item.get("role") == "assistant" and item.get("content")
         ][-6:]
-        tone_context = self.tone_prompt_context(emotion, message, history, memories)
+        memory_context = self.memory_reference_context(message, memories, fact_domain, temporary_facts)
+        tone_context = self.tone_prompt_context(emotion, message, history, memories, fact_domain)
         payload = {
             "task": "生成自然中文即时聊天回复。主要模拟 backup/user 侧风格，但不要机械复读。",
             "nuwa_protocol": NUWA_PROTOCOL,
@@ -542,16 +556,17 @@ class ChatEngine:
             "dialogue_act": dialogue_act,
             "identity_and_timeline_facts": self.public_facts(),
             "temporary_facts_from_retrieval": temporary_facts,
+            "memory_reference_context": memory_context,
             "fact_retrieval_policy": self.facts.get("retrieval_policy", {}),
             "persona_five_axes": persona_brief,
             "recent_history": history,
             "conversation_evidence": self.extract_conversation_evidence(message, history),
             "recent_assistant_replies": recent_assistant_replies,
             "conversation_memory": conversation_memory,
-            "retrieved_memories": memories,
+            "retrieved_memories": memory_context.get("evidence", []),
             "web_search": web_context_for_prompt(web_results or []),
             "recent_dialogue_state": self.recent_dialogue_state(history),
-            "style_samples_from_backup": self.extract_style_lines(memories)[:12],
+            "style_samples_from_backup": self.memory_style_samples(message, memories, fact_domain),
             "slang_and_homophone_cues": reply_cues(message),
             "user_message": message,
             "output_rules": [
@@ -565,9 +580,12 @@ class ChatEngine:
                 "tone_context 是从 backup 历史记录总结出的当前语气画像；要把 tone_context.record_style、recent_message_blend、matched_style_samples 拼在一起理解，再生成回复。",
                 "tone_context.current_turn_reading 如果指出上一句/当前话题的承接关系，优先按这个关系接话，不要跳成问答题。",
                 "如果 tone_context.selected_tone 是 playful/sleepy/annoyed/soft，回复必须体现对应状态；不要只回“不是/好吧/没有/不知道”这类泛短句。",
+                "memory_reference_context 必须看，但按 weight 使用：strong 才能当事实锚点，weak 只能当语气/联想背景。",
+                "普通闲聊时，当前 user_message 和 recent_history 权重大于历史记忆；不要把旧记录里的事件当成此刻正在发生。",
+                "只有 identity/birthday/time/relationship/preference/habit/nickname/topic/soothing/memory_dispute 这类事实域，才把 retrieved_memories 当强证据。",
                 "如果 active_topic_scope 不为空，说明当前日常话题尚未结束；除非用户明显换题/结束/问事实插问，否则思考方向和检索记忆都围绕该话题。",
                 "如果刚才问“在吗/醒着吗/干嘛去了”，用户回“吃饭/洗澡/上课/打游戏”等行为，这是在回答去向，先顺着接，不要否定。",
-                "style_samples_from_backup 的权重高于抽象总结；学节奏和用词，不要逐字复读。",
+                "style_samples_from_backup 只是低权重风格参考；学节奏和用词，不要逐字复读，也不要套用样本里的具体场景。",
                 "只输出回复正文，不解释检索过程。",
                 "可以很短，也可以分成连续几句，但要针对当前这句，不要套模板。",
                 "身份/名字/时间/是否说过的问题必须优先使用 identity_and_timeline_facts 和 retrieved_memories。",
@@ -595,7 +613,7 @@ class ChatEngine:
             "input": [
                 {
                     "role": "system",
-                    "content": "You simulate backup's concise Chinese WeChat style. Reply in micro chat bubbles, usually 1-2 but often 2-3 when the turn feels like quick consecutive messages. Keep each bubble short. Evidence outranks improvisation, but never sound like a report.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in micro chat bubbles, usually 1-2 but often 2-3 when the turn feels like quick consecutive messages. For fact questions, evidence outranks improvisation; for open chat, the current turn outranks old memories. Never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -621,7 +639,7 @@ class ChatEngine:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You simulate backup's concise Chinese WeChat style. Reply in micro chat bubbles, usually 1-2 but often 2-3 when the turn feels like quick consecutive messages. Keep each bubble short. Evidence outranks improvisation, but never sound like a report.",
+                    "content": "You simulate backup's concise Chinese WeChat style. Reply in micro chat bubbles, usually 1-2 but often 2-3 when the turn feels like quick consecutive messages. For fact questions, evidence outranks improvisation; for open chat, the current turn outranks old memories. Never sound like a report.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -1464,6 +1482,18 @@ class ChatEngine:
         if not stripped:
             return None
         recent_text = "\n".join(str(item.get("content", "")) for item in history[-8:])
+        if "我问你" in stripped and any(token in stripped for token in ["不是我", "不是我自己", "不是问我"]):
+            last_user = next(
+                (
+                    str(item.get("content", "")).strip()
+                    for item in reversed(history)
+                    if item.get("role") == "user" and str(item.get("content", "")).strip()
+                ),
+                "",
+            )
+            if any(token in last_user for token in ["困", "睡"]):
+                return pick(["困啊", "我困", "我说我"], seed + last_user)
+            return pick(["我知道啊", "问我啊", "说我呢"], seed + last_user)
         if "还想要什么关系" in stripped and any(token in recent_text for token in ["关系", "止步", "伤心"]):
             return "我要80你"
         if "冈易怎么跟米哈游比" in stripped and any(token in recent_text for token in ["互通", "换号", "单设备"]):
@@ -2269,6 +2299,106 @@ class ChatEngine:
             "rule": "这是当前不断线聊天的短期记忆。用户追问刚才/之前说了什么时，直接引用这里，不要去猜。",
         }
 
+    def memory_reference_context(
+        self,
+        message: str,
+        memories: list[dict[str, Any]],
+        fact_domain: str,
+        temporary_facts: dict[str, Any],
+    ) -> dict[str, Any]:
+        strong = fact_domain in STRONG_MEMORY_DOMAINS
+        evidence_limit = 8 if strong else 3
+        text_limit = 360 if strong else 180
+        evidence = (
+            self.compact_memory_evidence(memories, evidence_limit, text_limit)
+            if strong
+            else self.background_memory_hints(memories, evidence_limit)
+        )
+        if strong:
+            mode = "fact_anchor"
+            weight = "strong"
+            instruction = "这些记忆可用于回答事实，但仍要贴合当前问题；只取和问题直接相关的内容。"
+        else:
+            mode = "background_reference"
+            weight = "weak"
+            instruction = "这些记忆只用于保持熟悉感、话题联想和说话习惯；不能把旧事件当作此刻现实。"
+        return {
+            "mode": mode,
+            "weight": weight,
+            "fact_domain": fact_domain,
+            "must_reference": bool(evidence or temporary_facts.get("evidence")),
+            "evidence": evidence,
+            "temporary_fact_count": temporary_facts.get("evidence_count", 0),
+            "instruction": instruction,
+            "conflict_rule": "如果历史记忆和当前 user_message 冲突，普通闲聊以当前消息为准；事实提问才回到事实卡和直接证据。",
+        }
+
+    @staticmethod
+    def compact_memory_evidence(
+        memories: list[dict[str, Any]],
+        limit: int,
+        text_limit: int,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for memory in memories[:limit]:
+            text = fix_text(memory.get("text") or "")
+            lines = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip().startswith(("user[text]:", "target[text]:"))
+            ][:4]
+            snippet = "\n".join(lines)[:text_limit]
+            if not snippet:
+                continue
+            rows.append(
+                {
+                    "chunk_id": memory.get("chunk_id"),
+                    "score": memory.get("score"),
+                    "start_time": memory.get("start_time"),
+                    "snippet": snippet,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def background_memory_hints(memories: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for memory in memories[:limit]:
+            text = fix_text(memory.get("text") or "")
+            user_count = sum(1 for line in text.splitlines() if line.startswith("user[text]:"))
+            target_count = sum(1 for line in text.splitlines() if line.startswith("target[text]:"))
+            short_lines = [
+                line.split(":", 1)[1].strip()
+                for line in text.splitlines()
+                if line.startswith("user[text]:") and 1 <= len(line.split(":", 1)[1].strip()) <= 8
+            ]
+            rows.append(
+                {
+                    "chunk_id": memory.get("chunk_id"),
+                    "score": memory.get("score"),
+                    "start_time": memory.get("start_time"),
+                    "shape": {
+                        "backup_lines": user_count,
+                        "nonforgetter_lines": target_count,
+                        "short_backup_ratio_hint": round(len(short_lines) / max(1, user_count), 2),
+                    },
+                    "instruction": "弱参考：只借聊天节奏和熟悉感，不借这里的具体事实或具体回答。",
+                }
+            )
+        return rows
+
+    def memory_style_samples(
+        self,
+        message: str,
+        memories: list[dict[str, Any]],
+        fact_domain: str,
+    ) -> list[str]:
+        if fact_domain not in STRONG_MEMORY_DOMAINS:
+            return []
+        limit = 5
+        lines = self.extract_style_lines(memories)
+        return self.filter_style_phrases(lines)[:limit]
+
     def emotion_prompt_profile(self, emotion: str) -> dict[str, Any]:
         profile = ((self.tone_profiles.get("tones") or {}).get(emotion) or {}).copy()
         fallback = EMOTION_PROMPT_PROFILES.get(emotion) or EMOTION_PROMPT_PROFILES["casual"]
@@ -2291,6 +2421,7 @@ class ChatEngine:
         message: str,
         history: list[dict[str, Any]],
         memories: list[dict[str, Any]],
+        fact_domain: str = "open_chat",
     ) -> dict[str, Any]:
         recent_blend = [
             {
@@ -2301,7 +2432,7 @@ class ChatEngine:
             if str(item.get("content", "")).strip()
         ]
         record_profile = self.emotion_prompt_profile(emotion)
-        matched_samples = self.tone_matched_samples(emotion, memories)
+        matched_samples = self.tone_matched_samples(emotion, memories, fact_domain)
         return {
             "selected_tone": emotion,
             "trigger_reason": self.emotion_trigger_reason(message, history, emotion),
@@ -2318,10 +2449,16 @@ class ChatEngine:
             ],
         }
 
-    def tone_matched_samples(self, emotion: str, memories: list[dict[str, Any]]) -> list[str]:
+    def tone_matched_samples(
+        self,
+        emotion: str,
+        memories: list[dict[str, Any]],
+        fact_domain: str = "open_chat",
+    ) -> list[str]:
         record_profile = (self.tone_profiles.get("tones") or {}).get(emotion) or {}
         samples = self.filter_style_phrases(record_profile.get("examples", []))[:6]
-        memory_samples = self.extract_style_lines(memories)[:8]
+        memory_limit = 4 if fact_domain in STRONG_MEMORY_DOMAINS else 0
+        memory_samples = self.extract_style_lines(memories)[:memory_limit]
         result: list[str] = []
         seen = set()
         for line in [*samples, *memory_samples]:
@@ -2487,7 +2624,7 @@ class ChatEngine:
 
     @staticmethod
     def is_memory_dispute_question(message: str) -> bool:
-        return any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "绝对没有", "有记录"])
+        return any(token in message for token in ["说过", "没说过", "记得", "记错", "绝对没有", "有记录", "之前有没有", "以前有没有"])
 
     @staticmethod
     def is_identity_correction(message: str) -> bool:
@@ -2713,6 +2850,13 @@ class ChatEngine:
     @staticmethod
     def extract_temporary_facts(message: str, memories: list[dict[str, Any]], domain: str) -> dict[str, Any]:
         terms = ChatEngine.domain_terms(domain)
+        if domain not in STRONG_MEMORY_DOMAINS or not terms:
+            return {
+                "domain": domain,
+                "evidence_count": 0,
+                "evidence": [],
+                "rule": "当前不是强事实域；检索记忆只作背景参考，不能当成此刻事实。",
+            }
         evidence: list[dict[str, str]] = []
         for memory in memories:
             chunk_id = str(memory.get("chunk_id") or "")
@@ -2762,7 +2906,7 @@ class ChatEngine:
 
     @staticmethod
     def extract_conversation_evidence(message: str, history: list[dict[str, Any]]) -> list[dict[str, str]]:
-        if not any(token in message for token in ["说过", "没说过", "记得", "记错", "是不是", "姓", "名字", "绝对没有", "刚才", "刚刚", "上一句", "前面", "之前", "回答"]):
+        if not any(token in message for token in ["说过", "没说过", "记得", "记错", "姓", "名字", "绝对没有", "刚才", "刚刚", "上一句", "前面", "之前", "回答"]):
             return []
         rows: list[dict[str, str]] = []
         for item in history[-30:]:
